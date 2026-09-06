@@ -1,0 +1,30 @@
+[package]
+name = "rdsctl"
+version = "1.0.0"
+edition = "2021"
+description = "RDS 管控 — 基于容器的 MySQL 实例全生命周期管理(DAG 任务调度 + 容器编排)"
+license = "UNLICENSED"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dashmap = "5"
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 4
+strip = true
+
+# 精简 debug 档案:日常“跑起来/部署验证/演练”用,占盘远小于默认 dev
+# (仅行号调试信息、关闭增量、独立 target/dev-lean 目录);需要断点调试时仍用
+# 默认 `cargo build`(target/debug)或 `build.sh --debug`。
+[profile.dev-lean]
+inherits = "dev"
+opt-level = 0
+debug = 1
+incremental = false

@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 — RDS 管控台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%233b82f6'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      /* 设计 token:浅色企业风(白底 + 蓝主色) */
+      --primary: #60a5fa;
+      --primary-strong: #3b82f6;
+      --primary-deep: #2563eb;
+      --primary-soft: #eff6ff;
+      --primary-line: #bfdbfe;
+      --bg: #f4f5f7;
+      --panel: #ffffff;
+      --border: #e3e7ee;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --faint: #9aa3b2;
+      --err: #b91c1c;
+      --radius: 14px;
+      --ease: cubic-bezier(.2, .65, .3, 1);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body { height: 100%; }
+
+    body {
+      font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* 背景装饰:克制的橘色氛围光 */
+    body::before, body::after {
+      content: "";
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(90px);
+      opacity: .16;
+      pointer-events: none;
+      z-index: 0;
+    }
+    body::before { width: 420px; height: 420px; background: var(--primary); top: -140px; right: -120px; }
+    body::after { width: 380px; height: 380px; background: #3b82f6; bottom: -160px; left: -110px; }
+
+    .login-card {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      max-width: 392px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 34px 32px 28px;
+      box-shadow: 0 18px 44px -18px rgba(17, 24, 39, .16);
+      animation: rise .35s var(--ease) both;
+    }
+    @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+    .brand-mark {
+      width: 42px; height: 42px; flex: none;
+      border-radius: 11px;
+      display: grid; place-items: center;
+      color: #fff;
+      background: linear-gradient(135deg, var(--primary) 0%, var(--primary-deep) 100%);
+      box-shadow: 0 8px 18px -8px rgba(59, 130, 246, .35);
+    }
+    .brand-mark svg { width: 22px; height: 22px; }
+    .brand h1 { font-size: 19px; font-weight: 700; letter-spacing: .2px; }
+    .brand .ver { color: var(--faint); font-size: 11px; font-weight: 500; margin-left: 2px; }
+    .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 26px; }
+
+    .field { margin-bottom: 16px; }
+    .field label {
+      display: block;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+    .field .err-hint { color: var(--err); font-size: 11.5px; margin-top: 4px; display: none; }
+    .field.invalid .err-hint { display: block; }
+    .field.invalid input { border-color: #f87171; }
+
+    .input-wrap { position: relative; }
+    .input-wrap > svg {
+      position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+      width: 16px; height: 16px; color: var(--faint); pointer-events: none;
+    }
+    .input-wrap input {
+      width: 100%;
+      height: 42px;
+      padding: 0 40px 0 38px;
+      font-size: 14px;
+      color: var(--text);
+      background: #fafbfc;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      outline: none;
+      transition: border-color .18s var(--ease), background .18s var(--ease), box-shadow .18s var(--ease);
+    }
+    .input-wrap input::placeholder { color: #b3bcc9; }
+    .input-wrap input:hover { border-color: #cdd5e0; }
+    .input-wrap input:focus {
+      background: #fff;
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, .16);
+    }
+    .toggle-pass {
+      position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+      width: 30px; height: 30px; border: none; background: transparent; border-radius: 8px;
+      color: var(--faint); cursor: pointer; display: grid; place-items: center;
+    }
+    .toggle-pass:hover { color: var(--text); background: #f1f3f6; }
+    .toggle-pass svg { width: 17px; height: 17px; }
+
+    .btn {
+      width: 100%; height: 42px; margin-top: 6px;
+      border: none; border-radius: 10px;
+      font-size: 14.5px; font-weight: 600; letter-spacing: 4px; text-indent: 4px;
+      color: #fff; background: var(--primary-strong);
+      cursor: pointer;
+      transition: background .18s var(--ease), transform .12s var(--ease);
+      box-shadow: 0 10px 22px -12px rgba(59, 130, 246, .45);
+    }
+    .btn:hover { background: var(--primary-deep); }
+    .btn:active { transform: scale(.985); }
+    .btn:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
+
+    .foot {
+      margin-top: 22px; text-align: center;
+      color: var(--faint); font-size: 12px;
+    }
+    .foot b { color: var(--primary-strong); font-weight: 600; }
+
+    /* 全局键盘焦点可见 */
+    :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+    :focus:not(:focus-visible) { outline: none; }
+
+    .err-box {
+      display: none;
+      margin-top: 14px;
+      padding: 9px 12px;
+      font-size: 12.5px;
+      color: var(--err);
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      border-radius: 9px;
+    }
+    .err-box.show { display: block; animation: rise .2s var(--ease); }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="login-card">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5" rx="7" ry="3"></ellipse>
+          <path d="M5 5v7c0 1.7 3.1 3 7 3s7-1.3 7-3V5"></path>
+          <path d="M5 12v7c0 1.7 3.1 3 7 3s7-1.3 7-3v-7"></path>
+        </svg>
+      </span>
+      <h1>RDS 管控台<span class="ver">v1</span></h1>
+    </div>
+    <p class="sub">容器化 MySQL 实例全生命周期管控</p>
+
+    <form id="login-form" novalidate>
+      <div class="field" id="f-user">
+        <label for="user">用户名</label>
+        <div class="input-wrap">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+            <circle cx="12" cy="7" r="4"></circle>
+          </svg>
+          <input id="user" name="user" autocomplete="username" placeholder="请输入用户名" required autofocus>
+        </div>
+        <div class="err-hint" role="alert"></div>
+      </div>
+
+      <div class="field" id="f-pass">
+        <label for="password">密码</label>
+        <div class="input-wrap">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="4" y="10" width="16" height="10" rx="2"></rect>
+            <path d="M8 10V7a4 4 0 0 1 8 0v3"></path>
+          </svg>
+          <input id="password" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required>
+          <button type="button" class="toggle-pass" id="toggle-pass" aria-label="显示密码" aria-pressed="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"></path>
+              <circle cx="12" cy="12" r="3"></circle>
+            </svg>
+          </button>
+        </div>
+        <div class="err-hint" role="alert"></div>
+      </div>
+
+      <button type="submit" class="btn" id="btn-login">登 录</button>
+      <div class="err-box" id="err" role="alert"></div>
+    </form>
+
+    <p class="foot">受限管理网络 · <b>操作全程审计</b></p>
+  </div>
+
+  <script>
+    "use strict";
+    var form = document.getElementById("login-form");
+    var btn = document.getElementById("btn-login");
+    var errBox = document.getElementById("err");
+    var fUser = document.getElementById("f-user");
+    var fPass = document.getElementById("f-pass");
+
+    // 密码可见性切换
+    var toggle = document.getElementById("toggle-pass");
+    var passInput = document.getElementById("password");
+    toggle.addEventListener("click", function () {
+      var show = passInput.type === "password";
+      passInput.type = show ? "text" : "password";
+      toggle.setAttribute("aria-pressed", String(show));
+      toggle.setAttribute("aria-label", show ? "隐藏密码" : "显示密码");
+      toggle.innerHTML = show
+        ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+          '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"></path>' +
+          '<line x1="4" y1="4" x2="20" y2="20"></line></svg>'
+        : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+          '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"></path>' +
+          '<circle cx="12" cy="12" r="3"></circle></svg>';
+    });
+
+    function showErr(msg) {
+      errBox.textContent = msg;
+      errBox.classList.add("show");
+    }
+    function invalidate(field, msg) {
+      field.querySelector(".err-hint").textContent = msg;
+      field.classList.add("invalid");
+    }
+
+    form.addEventListener("submit", async function (e) {
+      e.preventDefault();
+      errBox.classList.remove("show");
+      fUser.classList.remove("invalid");
+      fPass.classList.remove("invalid");
+      var user = document.getElementById("user").value.trim();
+      var pass = document.getElementById("password").value;
+      var ok = true;
+      if (!user) { invalidate(fUser, "请输入用户名"); ok = false; }
+      if (!pass) { invalidate(fPass, "请输入密码"); ok = false; }
+      if (!ok) return;
+
+      btn.disabled = true;
+      btn.textContent = "登录中…";
+      try {
+        var body = new URLSearchParams();
+        body.set("user", user);
+        body.set("password", pass);
+        var r = await fetch("/login", { method: "POST", body: body });
+        if (r.ok) {
+          window.location.href = "/rds";
+          return;
+        }
+        var t = await r.text();
+        // 服务端明文错误消息(401/403/400)直接呈现
+        showErr(t || ("登录失败 (HTTP " + r.status + ")"));
+      } catch (ex) {
+        showErr("网络异常:" + ex);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "登 录";
+      }
+    });
+  </script>
+</body>
+
+</html>

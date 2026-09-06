@@ -1,0 +1,1353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <title>Orbit</title>
+  <style>:root {
+  /* 色板 token(评审后收敛,避免魔法值) */
+  --bg: #0f1419;
+  --panel: #1a2029;
+  --panel2: #161c26;
+  --panel2-hover: #1c2430;
+  --border: #2a3342;
+  --line: #222a36;
+  --text: #d7dee8;
+  --muted: #8b98ab;
+  --faint: #5a6675;
+  --accent: #4f8cff;
+  --ok: #34c759;
+  --warn: #ffcc00;
+  --crit: #ff9500;
+  --err: #ff3b30;
+  --tab-on: #22314a;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius: 10px;
+  --ease: cubic-bezier(.2, .65, .3, 1);
+}
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+      padding: 20px 24px 60px;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 18px;
+    }
+
+    header h1 {
+      font-size: 18px;
+    }
+
+    header .sub {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+
+    input {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 7px 10px;
+      font-size: 13px;
+      width: 200px;
+    }
+
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 7px 14px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      filter: brightness(1.12);
+    }
+
+    button.ghost {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+
+    button.danger {
+      background: var(--err);
+    }
+
+    button:disabled {
+      opacity: .5;
+      cursor: not-allowed;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 12px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+
+    .card h3 {
+      font-size: 15px;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+
+    .b-running {
+      background: #1b3a2a;
+      color: var(--ok);
+    }
+
+    .b-creating,
+    .b-scaling,
+    .b-destroying {
+      background: #3a341b;
+      color: var(--warn);
+    }
+
+    .b-destroyed,
+    .b-failed {
+      background: #3a1b1b;
+      color: var(--err);
+    }
+
+    .b-paused,
+    .b-switching,
+    .b-maintenance {
+      background: #33291b;
+      color: #ffd60a;
+    }
+
+    .b-degraded {
+      background: #3a2a17;
+      color: var(--crit);
+    }
+
+    /* 汇总条 / 健康 */
+    .sum {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin: 8px 0 4px;
+    }
+
+    .sum .chip {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 4px 12px;
+      background: var(--panel2);
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .sum .chip:hover {
+      background: var(--panel2-hover);
+    }
+
+    .sum .chip.on {
+      outline: 1px solid var(--accent);
+    }
+
+    .sum .chip b {
+      font-size: 16px;
+      display: block;
+      line-height: 1.2;
+    }
+
+    .sum .chip small {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .sum .chip.good b {
+      color: var(--ok);
+    }
+
+    .sum .chip.warn b {
+      color: var(--crit);
+    }
+
+    .sum .chip.bad b {
+      color: var(--err);
+    }
+
+    .sum .chip.run b {
+      color: var(--warn);
+    }
+
+    .meta.err {
+      color: var(--crit);
+    }
+
+    .audit-table a {
+      color: #7aa2f7;
+      cursor: pointer;
+    }
+
+    /* 审计表 */
+    .audit-table th:nth-child(1),
+    .audit-table td:nth-child(1) {
+      white-space: nowrap;
+    }
+
+    .audit-table td.params,
+    .audit-table td.result {
+      color: var(--muted);
+      font-family: ui-monospace, monospace;
+      font-size: 11px;
+      max-width: 260px;
+      overflow-wrap: anywhere;
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      margin: 4px 0;
+    }
+
+    .meta b {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .ops {
+      margin-top: 10px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .nodes-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+
+    .node-tag {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+    }
+
+    .node-tag.master {
+      border-color: var(--crit);
+      color: var(--crit);
+    }
+
+    .node-tag.slave {
+      border-color: var(--ok);
+      color: var(--ok);
+    }
+
+    .node-tag.proxy {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* 详情 */
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 14px;
+    }
+
+    .panel h2 {
+      font-size: 15px;
+      margin-bottom: 10px;
+    }
+
+    .topo {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      padding: 10px 0;
+    }
+
+    .topo .box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      text-align: center;
+      min-width: 120px;
+    }
+
+    .topo .box .t {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .topo .box .n {
+      font-weight: 600;
+    }
+
+    .topo .arrow {
+      color: var(--accent);
+      font-size: 18px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th,
+    td {
+      text-align: left;
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 500;
+      font-size: 12px;
+    }
+
+    td.mono {
+      font-family: ui-monospace, monospace;
+    }
+
+    /* 任务 */
+    .task {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 8px;
+      overflow: hidden;
+    }
+
+    .task-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      cursor: pointer;
+      background: var(--panel2);
+    }
+
+    .task-head:hover {
+      background: var(--panel2-hover);
+    }
+
+    .task-head button.ghost {
+      padding: 2px 8px;
+      font-size: 11px;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+
+    .task-body {
+      padding: 8px 12px;
+      border-top: 1px solid var(--line);
+    }
+
+    .node-row {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      padding: 3px 0;
+      font-size: 13px;
+    }
+
+    .node-row .st {
+      width: 58px;
+      font-size: 11px;
+      text-align: center;
+      border-radius: 4px;
+      padding: 1px 0;
+      flex-shrink: 0;
+    }
+
+    .st-pending {
+      color: var(--muted);
+    }
+
+    .st-running {
+      color: var(--warn);
+    }
+
+    .st-success {
+      color: var(--ok);
+    }
+
+    .st-failed {
+      color: var(--err);
+    }
+
+    .st-skipped {
+      color: var(--faint);
+    }
+
+    .node-output {
+      color: var(--muted);
+      font-size: 11px;
+      font-family: ui-monospace, monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .empty {
+      color: var(--faint);
+      text-align: center;
+      padding: 18px;
+    }
+
+    .toast {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      background: #1b3a2a;
+      color: var(--ok);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 13px;
+      display: none;
+      z-index: 99;
+      max-width: 420px;
+    }
+
+    .toast.err {
+      background: #3a1b1b;
+      color: var(--err);
+    }
+
+    /* 分页导航 */
+    nav.tabs {
+      display: flex;
+      gap: 6px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px;
+      padding-bottom: 6px;
+    }
+
+    nav.tabs .tab {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--muted);
+      padding: 6px 18px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    nav.tabs .tab:hover {
+      color: var(--text);
+      background: var(--panel);
+    }
+
+    nav.tabs .tab.on {
+      color: #fff;
+      background: var(--tab-on);
+      border-color: var(--accent);
+    }
+
+    section h2.page-title {
+      margin: 4px 0 12px;
+      font-size: 16px;
+    }
+
+    .ov-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 2px;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+    }
+
+    .ov-row .name {
+      cursor: pointer;
+      color: #7aa2f7;
+    }
+
+    .ov-row .reason {
+      color: var(--crit);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+  
+    /* 签名:实例卡左侧状态轨(唯一的大胆元素) */
+    .cards .card {
+      position: relative;
+      overflow: hidden;
+      transition: transform .15s var(--ease), border-color .15s var(--ease);
+    }
+    .cards .card::before {
+      content: "";
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 4px;
+      background: var(--border);
+    }
+    .cards .card[data-status="running"]::before { background: var(--ok); }
+    .cards .card[data-status="creating"]::before,
+    .cards .card[data-status="scaling"]::before,
+    .cards .card[data-status="destroying"]::before,
+    .cards .card[data-status="switching"]::before,
+    .cards .card[data-status="maintenance"]::before,
+    .cards .card[data-status="paused"]::before { background: var(--warn); }
+    .cards .card[data-status="degraded"]::before { background: var(--crit); }
+    .cards .card[data-status="failed"]::before { background: var(--err); }
+    .cards .card[data-status="destroyed"]::before { background: var(--faint); }
+    .cards .card:hover {
+      transform: translateY(-2px);
+      border-color: #3a4657;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, .35);
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .cards .card[data-status="degraded"]::before,
+      .cards .card[data-status="failed"]::before {
+        animation: statusPulse 2.4s ease-in-out infinite;
+      }
+    }
+    @keyframes statusPulse {
+      0%, 100% { opacity: .55; }
+      50% { opacity: 1; }
+    }
+
+    /* 数据等宽:便于扫描 id/端口/时间/输出 */
+    .mono {
+      font-family: var(--mono);
+    }
+
+    /* 焦点可见 + 动效克制(质量底线) */
+    :focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation: none !important;
+        transition: none !important;
+      }
+    }
+    @media (max-width: 720px) {
+      nav.tabs {
+        overflow-x: auto;
+        white-space: nowrap;
+      }
+      .sum { flex-wrap: wrap; }
+    }
+</style>
+</head>
+
+<body>
+  <header>
+    <div>
+      <h1>Orbit <span class="sub">容器化 MySQL 实例运维台</span></h1>
+    </div>
+    <a href="/">← 返回代理面板</a>
+  </header>
+
+  <nav class="tabs" id="topnav">
+    <button class="tab on" id="tab-overview" onclick="navTo('overview')">概览</button>
+    <button class="tab" id="tab-instances" onclick="navTo('instances')">实例</button>
+    <button class="tab" id="tab-tasks" onclick="navTo('tasks')">任务</button>
+    <button class="tab" id="tab-audit" onclick="navTo('audit')">审计</button>
+  </nav>
+
+  <div id="overview-view" style="display:none;">
+  <h2 class="page-title">概览</h2>
+  <div class="panel">
+    <h2>异常实例（降级 / 失败）</h2>
+    <div id="overview-anomalies"><div class="empty">暂无异常实例</div></div>
+  </div>
+  <div class="panel">
+    <h2>进行中的任务</h2>
+    <div id="overview-running"><div class="empty">暂无进行中任务</div></div>
+  </div>
+  <div class="sum" id="sum-chips" style="margin-top:14px;"></div>
+</div>
+
+<div id="list-view">
+  <h2 class="page-title">实例</h2>
+  <div class="toolbar">
+    <input id="new-name" placeholder="实例名(字母/数字/-/_)" onkeydown="if(event.key==='Enter')createInstance()">
+    <button onclick="createInstance()">创建实例</button>
+    <span style="color:#8b98ab;font-size:12px;">默认 1 主 2 从：从-1 在线读(挂代理)，从-2 离线从(备份/统计/大查询共用，每实例仅一个)</span>
+  </div>
+  <div class="toolbar" style="flex-wrap:wrap;">
+    <select id="f-status" style="width:auto;" onchange="resetPage()">
+      <option value="">全部状态</option>
+      <option value="running">运行中</option>
+      <option value="creating">创建中</option>
+      <option value="scaling">扩容中</option>
+      <option value="destroying">销毁中</option>
+      <option value="degraded">降级(异常)</option>
+      <option value="failed">失败</option>
+      <option value="destroyed">已销毁</option>
+      <option value="paused">已暂停</option>
+      <option value="switching">切换中</option>
+      <option value="maintenance">维护中</option>
+    </select>
+    <input id="f-region" placeholder="region 筛选" style="width:130px;" onkeydown="if(event.key==='Enter')resetPage()">
+    <input id="f-q" placeholder="按名称搜索" style="width:150px;" onkeydown="if(event.key==='Enter')resetPage()">
+    <button class="ghost" onclick="resetPage()">筛选</button>
+    <span id="inst-total" style="color:#8b98ab;font-size:12px;margin-left:auto;"></span>
+    <button class="ghost" id="btn-more" onclick="loadMore()" style="display:none;">加载更多</button>
+    <button class="ghost" id="btn-top" onclick="backToTop()" style="display:none;">回到第一页(自动刷新)</button>
+  </div>
+  <div class="cards" id="cards"></div>
+</div>
+
+<div id="tasks-view" style="display:none;">
+  <h2 class="page-title">任务中心（服务端近 300 条,可用下方条件筛选）</h2>
+  <div class="toolbar" id="task-filters" style="flex-wrap:wrap;">
+    <input id="tf-instance" placeholder="按实例筛" style="width:130px;" onkeydown="if(event.key==='Enter')resetTaskFilters()">
+    <select id="tf-kind" style="width:auto;" onchange="resetTaskFilters()">
+      <option value="">全部类型</option>
+      <option value="create">创建</option>
+      <option value="destroy">销毁</option>
+      <option value="scaleout">扩容</option>
+    </select>
+    <select id="tf-status" style="width:auto;" onchange="resetTaskFilters()">
+      <option value="">全部状态</option>
+      <option value="running">执行中</option>
+      <option value="success">成功</option>
+      <option value="failed">失败</option>
+      <option value="skipped">跳过</option>
+      <option value="pending">等待</option>
+    </select>
+    <input id="tf-q" placeholder="搜索任务/节点名" style="width:160px;" onkeydown="if(event.key==='Enter')resetTaskFilters()">
+    <button class="ghost" onclick="resetTaskFilters()">筛选</button>
+    <button class="ghost" onclick="clearTaskFilters()">清除</button>
+    <span id="task-total" style="color:#8b98ab;font-size:12px;margin-left:auto;"></span>
+  </div>
+  <div id="tasks"></div>
+</div>
+
+<div id="audit-view" style="display:none;">
+  <h2 class="page-title">审计日志（最近 200 条,可筛选;实例名/任务 id 可点击跳转）</h2>
+  <div class="toolbar" id="audit-filters" style="flex-wrap:wrap;">
+    <input id="af-instance" placeholder="按实例筛" style="width:140px;" onkeydown="if(event.key==='Enter')applyAuditFilter()">
+    <input id="af-action" placeholder="按操作(如 degrade / task:create)" style="width:180px;" onkeydown="if(event.key==='Enter')applyAuditFilter()">
+    <input id="af-q" placeholder="关键词" style="width:150px;" onkeydown="if(event.key==='Enter')applyAuditFilter()">
+    <button class="ghost" onclick="applyAuditFilter()">筛选</button>
+    <button class="ghost" onclick="clearAuditFilter()">清除</button>
+    <span id="audit-count" style="color:#8b98ab;font-size:12px;margin-left:auto;"></span>
+  </div>
+  <div class="panel">
+    <table class="audit-table">
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>用户</th>
+          <th>实例</th>
+          <th>操作</th>
+          <th>参数</th>
+          <th>结果</th>
+          <th>任务</th>
+        </tr>
+      </thead>
+      <tbody id="audit-rows"></tbody>
+    </table>
+  </div>
+</div>
+
+<div id="detail-view" style="display:none;">
+  <div class="toolbar">
+    <button class="ghost" onclick="backToList()">← 返回实例列表</button>
+    <h2 id="detail-title" style="font-size:16px;"></h2>
+  </div>
+  <div class="panel">
+    <h2>拓扑</h2>
+    <div class="topo" id="detail-topo"></div>
+  </div>
+  <div class="panel">
+    <h2>操作</h2>
+    <div class="meta err" id="detail-reason" style="display:none;margin-bottom:6px;"></div>
+    <div class="ops" id="detail-ops"></div>
+    <div style="color:#8b98ab;font-size:12px;margin-top:6px;" id="detail-ops-hint"></div>
+  </div>
+  <div class="panel">
+    <h2>实例任务</h2>
+    <div id="detail-tasks"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+  <script>
+    let current = null; // 当前查看的实例名
+    let expandedTask = null; // 任务列表当前展开的任务;运行中任务自动展开(pinnedUntil/userClosed 控制)
+
+    async function jget(path) {
+      const r = await fetch(path, { headers: { "Accept": "application/json" } });
+      if (r.status === 401) { location.href = "/"; throw new Error("未登录"); }
+      if (!r.ok) throw new Error(path + " -> HTTP " + r.status);
+      return r.json();
+    }
+    async function jpost(path) {
+      const r = await fetch(path, { method: "POST" });
+      if (r.status === 401) { location.href = "/"; throw new Error("未登录"); }
+      const d = await r.json();
+      if (!r.ok || d.ok === false) throw new Error(d.error || (path + " -> HTTP " + r.status));
+      return d;
+    }
+    function toast(msg, ok) {
+      const t = document.getElementById("toast");
+      t.textContent = msg; t.className = "toast" + (ok === false ? " err" : "");
+      t.style.display = "block";
+      clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 3500);
+    }
+    const STATUS_CLS = {
+      running: "b-running", creating: "b-creating", scaling: "b-creating",
+      destroying: "b-destroying", destroyed: "b-failed", failed: "b-failed",
+      paused: "b-paused", switching: "b-switching", maintenance: "b-maintenance",
+      degraded: "b-degraded"
+    };
+    const STATUS_LABEL = {
+      running: "运行中", creating: "创建中", scaling: "扩容中",
+      destroying: "销毁中", destroyed: "已销毁", failed: "失败",
+      paused: "已暂停", switching: "切换中", maintenance: "维护中",
+      degraded: "降级(异常)"
+    };
+    // ─── 状态机操作规则(与后端一致:并发操作由后端拒绝,前端按状态置灰) ───
+    function scaleoutAllowed(st) { return st === "running"; }
+    function destroyAllowed(st) { return st === "running" || st === "degraded" || st === "failed"; }
+    // 最近一次任务轮询结果(全局缓存,供实例按钮感知"实例是否有任务执行中")
+    let allTasks = [];
+    let sumSel = ""; // 汇总条当前选中的状态(与 f-status 联动高亮)
+    function instanceBusy(name) {
+      return allTasks.some(t => t.instance === name && t.status === "running");
+    }
+
+    // ─── 汇总条(dashboard:状态分布 + 进行中任务) ───
+    const SUM_ROWS = [
+      ["全部实例", "", "全部"],
+      ["运行中", "running", "good"],
+      ["变更中", "moving", "run"],
+      ["降级", "degraded", "warn"],
+      ["失败", "failed", "bad"],
+      ["已销毁", "destroyed", ""],
+    ];
+    const MOVING = new Set(["creating", "scaling", "destroying", "switching", "maintenance", "paused"]);
+    // ─── 概览页(dashboard:状态分布 + 异常实例 + 进行中任务) ───
+    async function loadOverview() {
+      try {
+        const d = await jget("/api/rds/summary");
+        const s = d.summary || {};
+        const bs = s.by_status || {};
+        const moving = (bs.creating || 0) + (bs.scaling || 0) + (bs.destroying || 0) +
+          (bs.switching || 0) + (bs.maintenance || 0) + (bs.paused || 0);
+        const box = document.getElementById("sum-chips");
+        box.innerHTML = "";
+        const mkChip = (label, key, n, cls) => {
+          const chip = el("div", "chip " + (cls || ""));
+          chip.appendChild(el("b", "", String(n)));
+          chip.appendChild(el("small", "", label));
+          if (key !== null) {
+            const isOn = key === "" ? sumSel === "" : key === "moving" ? sumSel === "moving" : sumSel === key;
+            if (isOn) chip.classList.add("on");
+            chip.onclick = () => {
+              document.getElementById("f-status").value = (key === "moving" || key === "") ? "" : key;
+              sumSel = key === "" ? "" : key;
+              instOffset = 0;
+              setRoute("#/instances");
+              refreshInstances();
+            };
+          }
+          box.appendChild(chip);
+        };
+        mkChip("全部实例", "", s.total || 0, "");
+        mkChip("运行中", "running", bs.running || 0, "good");
+        mkChip("变更中(创建/扩容/销毁等)", "moving", moving, "run");
+        mkChip("降级(异常)", "degraded", bs.degraded || 0, "warn");
+        mkChip("失败", "failed", bs.failed || 0, "bad");
+        mkChip("已销毁", "destroyed", bs.destroyed || 0, "");
+        const rt = el("div", "chip");
+        rt.appendChild(el("b", "", String(s.running_tasks || 0)));
+        rt.appendChild(el("small", "", "进行中任务"));
+        box.appendChild(rt);
+      } catch (e) { /* 未登录等 */ }
+      try { await renderOverviewAnomalies(); } catch (e) { /* 忽略 */ }
+      try { renderOverviewRunning(); } catch (e) { /* 忽略 */ }
+    }
+    async function renderOverviewAnomalies() {
+      const rows = [];
+      for (const st of ["degraded", "failed"]) {
+        try {
+          const d = await jget("/api/rds/instances?status=" + st + "&limit=50");
+          for (const it of (d.instances || [])) rows.push(it);
+        } catch (e) { /* 忽略 */ }
+      }
+      const box = document.getElementById("overview-anomalies");
+      box.innerHTML = "";
+      if (!rows.length) { box.innerHTML = '<div class="empty">暂无异常实例</div>'; return; }
+      rows.sort((a, b) => b.created_at - a.created_at);
+      for (const it of rows.slice(0, 20)) {
+        const r = el("div", "ov-row");
+        const nm = el("span", "name", it.name);
+        nm.onclick = () => goInstance(it.name);
+        r.appendChild(nm);
+        r.appendChild(el("span", "badge " + (STATUS_CLS[it.status] || ""), STATUS_LABEL[it.status] || it.status));
+        r.appendChild(el("span", "reason", it.last_error || "(无原因)"));
+        box.appendChild(r);
+      }
+    }
+    function renderOverviewRunning() {
+      const box = document.getElementById("overview-running");
+      const run = (allTasks || []).filter(t => t.status === "running");
+      box.innerHTML = "";
+      if (!run.length) { box.innerHTML = '<div class="empty">暂无进行中任务</div>'; return; }
+      for (const t of run.slice(0, 10)) {
+        const r = el("div", "ov-row");
+        r.appendChild(el("span", "st st-running", "运行中"));
+        r.appendChild(el("span", "", (KIND_CN[t.kind] || t.kind || "任务") + " · " + (t.instance || "")));
+        const go = el("span", "name", t.id);
+        go.onclick = () => goTask(t.id);
+        r.appendChild(go);
+        box.appendChild(r);
+      }
+    }
+
+    // ─── URL 路由与视图切换(分页:概览/实例/任务/审计/详情) ───
+    const VIEW_IDS = ["overview-view", "list-view", "tasks-view", "audit-view", "detail-view"];
+    let applyingRoute = false;
+    function setRoute(h) { if (location.hash !== h) location.hash = h; }
+    function switchViewOnly(id) {
+      for (const vid of VIEW_IDS) {
+        const e = document.getElementById(vid);
+        if (e) e.style.display = vid === id ? "block" : "none";
+      }
+    }
+    function setTab(page) {
+      document.querySelectorAll("#topnav .tab").forEach(t => t.classList.toggle("on", t.id === "tab-" + page));
+    }
+    function navTo(page) {
+      const map = { overview: "overview-view", instances: "list-view", tasks: "tasks-view", audit: "audit-view" };
+      const id = map[page] || "list-view";
+      if (page !== "detail") current = null;
+      switchViewOnly(id);
+      setTab(page);
+      const path = page === "overview" ? "#/overview" : page === "tasks" ? "#/tasks" : page === "audit" ? "#/audit" : "#/instances";
+      if (location.hash !== path) setRoute(path);
+      if (page === "overview") loadOverview();
+      else if (page === "instances") refreshInstances();
+      else if (page === "tasks") renderTaskPanel();
+      else if (page === "audit") refreshAudit();
+    }
+    function showDetailOf(name) {
+      current = name;
+      switchViewOnly("detail-view");
+      setTab("instances");
+      refreshDetail();
+    }
+    function goInstance(name) {
+      if (!name || name === "-") return;
+      current = name;
+      setRoute("#/i/" + encodeURIComponent(name));
+    }
+    function goTask(id) {
+      if (!id || id === "-") return;
+      setRoute("#/t/" + encodeURIComponent(id));
+    }
+    function applyRouteFromHash() {
+      if (applyingRoute) return;
+      applyingRoute = true;
+      try {
+        const h = (location.hash || "#/overview").replace(/^#/, "");
+        if (h.startsWith("/i/")) {
+          const name = decodeURIComponent(h.slice(3));
+          const shown = document.getElementById("detail-view").style.display !== "none";
+          if (!(shown && current === name)) showDetailOf(name);
+        } else if (h.startsWith("/t/")) {
+          navTo("tasks");
+          expandedTask = decodeURIComponent(h.slice(3));
+          userClosed = false;
+          pinnedUntil = Date.now() + 10000; // 深链目标固定展开窗口
+          renderTaskPanel();
+        } else if (h.startsWith("/audit")) {
+          navTo("audit");
+        } else if (h.startsWith("/tasks")) {
+          navTo("tasks");
+        } else if (h.startsWith("/instances") || h === "/") {
+          navTo("instances");
+        } else {
+          navTo("overview");
+        }
+      } catch (e) { /* 路由解析容错 */ } finally { applyingRoute = false; }
+    }
+    window.addEventListener("hashchange", applyRouteFromHash);
+    const NODE_ST = {
+      pending: ["st-pending", "等待"], running: ["st-running", "执行中"],
+      success: ["st-success", "成功"], failed: ["st-failed", "失败"], skipped: ["st-skipped", "跳过"]
+    };
+    const KIND_CN = { create: "创建", destroy: "销毁", scaleout: "扩容", task: "任务", test: "测试" };
+    function el(tag, cls, text) {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text !== undefined) e.textContent = text;
+      return e;
+    }
+    function fmtTime(ts) { return ts ? new Date(ts * 1000).toLocaleString() : "-"; }
+
+    // ─── 实例列表 ───
+    async function createInstance() {
+      const name = document.getElementById("new-name").value.trim();
+      if (!name) { toast("请输入实例名", false); return; }
+      try {
+        const d = await jpost("/api/rds/create?name=" + encodeURIComponent(name));
+        toast("创建任务已提交: " + d.task_id);
+        document.getElementById("new-name").value = "";
+        refresh();
+      } catch (e) { toast(e.message, false); }
+    }
+
+    // 分页状态(列表视图;offset>0 时暂停自动整页刷新,由用户控制)
+    const INST_PAGE = 200;
+    let instOffset = 0;
+    function instQuery() {
+      const p = new URLSearchParams();
+      const st = document.getElementById("f-status").value;
+      const rg = document.getElementById("f-region").value.trim();
+      const kw = document.getElementById("f-q").value.trim();
+      if (st) p.set("status", st);
+      if (rg) p.set("region", rg);
+      if (kw) p.set("q", kw);
+      p.set("limit", INST_PAGE); p.set("offset", instOffset);
+      return p.toString();
+    }
+    function makeCard(i) {
+      const c = el("div", "card");
+      c.setAttribute("data-status", i.status || "");
+      const h = el("h3");
+      h.appendChild(document.createTextNode(i.name));
+      const badge = el("span", "badge " + (STATUS_CLS[i.status] || ""), STATUS_LABEL[i.status] || i.status);
+      if (i.region && i.region !== "default") {
+        const rg = el("span", "badge", i.region);
+        rg.style.background = "#1b2738"; rg.style.color = "#7aa2f7";
+        h.appendChild(rg);
+      }
+      h.appendChild(badge);
+      c.appendChild(h);
+      const master = (i.nodes || []).find(n => n.role === "master");
+      const slaves = (i.nodes || []).filter(n => n.role !== "master");
+      const meta1 = el("div", "meta");
+      meta1.innerHTML = '主 <b class="mono">' + (master ? master.container : "-") + "</b> · 从 ×<b>" + (slaves.length) +
+        '</b> · 代理 <b class="mono">' + (i.proxy ? i.proxy.container : "-") + "</b>";
+      c.appendChild(meta1);
+      const meta2 = el("div", "meta");
+      meta2.innerHTML = 'MySQL :<b class="mono">' + (i.proxy ? i.proxy.mysql_port : "-") +
+        '</b> · 管理 :<b class="mono">' + (i.proxy ? i.proxy.mng_port : "-") +
+        '</b> · 创建于 <span class="mono">' + fmtTime(i.created_at) + "</span>";
+      c.appendChild(meta2);
+      if (i.last_error) {
+        const err = el("div", "meta err", "⚠ " + i.last_error);
+        err.title = i.last_error;
+        c.appendChild(err);
+      }
+      const nr = el("div", "nodes-row");
+      for (const n of i.nodes || []) {
+        const tag = el("span", "node-tag " + (n.role === "master" ? "master" : "slave"));
+        tag.appendChild(document.createTextNode(n.role_label + " "));
+        tag.appendChild(el("span", "mono", String(n.host_port)));
+        nr.appendChild(tag);
+      }
+      const ptag = el("span", "node-tag proxy");
+      ptag.appendChild(document.createTextNode("proxy :"));
+      ptag.appendChild(el("span", "mono", String(i.proxy ? i.proxy.mysql_port : "?")));
+      nr.appendChild(ptag);
+      c.appendChild(nr);
+      const ops = el("div", "ops");
+      const d1 = el("button", "ghost", "详情 / 任务");
+      d1.onclick = () => { current = i.name; showDetail(); };
+      ops.appendChild(d1);
+      const busy = instanceBusy(i.name);
+      const canScale = scaleoutAllowed(i.status) && !busy;
+      const canDestroy = destroyAllowed(i.status) && !busy;
+      const s = el("button", "ghost", "扩容读从");
+      s.disabled = !canScale;
+      s.title = canScale ? "" : (busy ? "实例有任务执行中" : "仅 运行中 状态可扩容");
+      s.onclick = () => { current = i.name; scaleout("read"); };
+      ops.appendChild(s);
+      const dd = el("button", "danger", "销毁");
+      dd.disabled = !canDestroy;
+      dd.title = canDestroy ? "" : (busy ? "实例有任务执行中" : "仅 运行中/降级/失败 状态可销毁");
+      dd.onclick = () => { current = i.name; destroyInstance(); };
+      ops.appendChild(dd);
+      c.appendChild(ops);
+      return c;
+    }
+    function renderInstances(list) {
+      const cards = document.getElementById("cards");
+      cards.innerHTML = "";
+      if (!list.length) { cards.innerHTML = '<div class="empty" style="grid-column:1/-1;">暂无实例 — 输入名称点击「创建实例」</div>'; return; }
+      for (const i of list) cards.appendChild(makeCard(i));
+    }
+    function appendInstances(list) {
+      const cards = document.getElementById("cards");
+      for (const i of list) cards.appendChild(makeCard(i));
+    }
+    async function refreshInstances() {
+      try {
+        const d = await jget("/api/rds/instances?" + instQuery());
+        document.getElementById("inst-total").textContent = "共 " + d.total + " 个";
+        const got = d.instances || [];
+        document.getElementById("btn-more").style.display = (instOffset + got.length) < d.total ? "" : "none";
+        document.getElementById("btn-top").style.display = instOffset > 0 ? "" : "none";
+        if (instOffset === 0) renderInstances(got); else appendInstances(got);
+      } catch (e) { /* 未登录等 */ }
+    }
+    function resetPage() { instOffset = 0; refreshInstances(); }
+    function loadMore() { instOffset += INST_PAGE; refreshInstances(); }
+    function backToTop() { instOffset = 0; refreshInstances(); }
+
+    // ─── 视图快捷入口(供按钮/老代码调用;真正切换经路由) ───
+    async function showDetail() {
+      if (current) setRoute("#/i/" + encodeURIComponent(current));
+    }
+    function backToList() {
+      setRoute("#/instances");
+    }
+    function showAudit() {
+      setRoute("#/audit");
+    }
+    function auditQuery() {
+      const p = new URLSearchParams();
+      const inst = document.getElementById("af-instance").value.trim();
+      const act = document.getElementById("af-action").value.trim();
+      const q = document.getElementById("af-q").value.trim();
+      if (inst) p.set("instance", inst);
+      if (act) p.set("action", act);
+      if (q) p.set("q", q);
+      return p.toString();
+    }
+    function applyAuditFilter() { refreshAudit(); }
+    function clearAuditFilter() {
+      document.getElementById("af-instance").value = "";
+      document.getElementById("af-action").value = "";
+      document.getElementById("af-q").value = "";
+      refreshAudit();
+    }
+    function linkCell(text, onGo) {
+      const td = el("td", "params");
+      if (text && text !== "-" && text !== "") {
+        const a = el("a", "", text);
+        a.onclick = onGo;
+        td.appendChild(a);
+      } else {
+        td.textContent = text || "-";
+      }
+      return td;
+    }
+    async function refreshAudit() {
+      try {
+        const d = await jget("/api/rds/audit?" + auditQuery());
+        document.getElementById("audit-count").textContent =
+          "命中 " + (d.audit || []).length + " 条(倒序,上限 200)";
+        const rows = document.getElementById("audit-rows");
+        rows.innerHTML = "";
+        const list = d.audit || [];
+        for (const a of list) {
+          const tr = document.createElement("tr");
+          tr.appendChild(el("td", "mono", fmtTime(a.ts)));
+          tr.appendChild(el("td", "", a.user || "-"));
+          tr.appendChild(linkCell(a.instance || "", () => goInstance(a.instance)));
+          tr.appendChild(el("td", "", a.action || "-"));
+          tr.appendChild(el("td", "params", a.params || ""));
+          tr.appendChild(el("td", "result", a.result || ""));
+          tr.appendChild(linkCell(a.task_id || "", () => goTask(a.task_id)));
+          rows.appendChild(tr);
+        }
+        if (!list.length) {
+          const tr2 = document.createElement("tr");
+          const td2 = el("td", "empty", "没有匹配的审计事件 — 执行创建/扩容/销毁或触发巡检降级后,这里会出现记录。");
+          td2.colSpan = 7;
+          tr2.appendChild(td2);
+          rows.appendChild(tr2);
+        }
+      } catch (e) { /* 忽略刷新失败 */ }
+    }
+    // 详情页操作区:按状态机置灰(销毁: 运行/降级/失败; 扩容: 运行)
+    function renderOps(i) {
+      const box = document.getElementById("detail-ops");
+      const hint = document.getElementById("detail-ops-hint");
+      box.innerHTML = "";
+      const busy = instanceBusy(i.name);
+      const mk = (label, cls, allowed, tip, fn) => {
+        const b = el("button", cls, label);
+        b.disabled = !allowed;
+        b.title = allowed ? "" : tip;
+        b.onclick = fn;
+        box.appendChild(b);
+      };
+      const hasOffline = (i.nodes || []).some(n =>
+        n.role === "offline" || n.role === "stats" || n.role === "backup");
+      mk("扩容在线读从", "", scaleoutAllowed(i.status) && !busy,
+        busy ? "实例有任务执行中,操作被拒绝" : "仅 运行中 状态可扩容",
+        () => scaleout("read"));
+      mk("扩容离线从(备份/统计/大查询)", "", scaleoutAllowed(i.status) && !busy && !hasOffline,
+        busy ? "实例有任务执行中,操作被拒绝" :
+          (hasOffline ? "离线从(备份/统计/大查询共用)每实例仅允许一个" : "仅 运行中 状态可扩容"),
+        () => scaleout("offline"));
+      mk("销毁实例", "danger", destroyAllowed(i.status) && !busy,
+        busy ? "实例有任务执行中,操作被拒绝" : "仅 运行中/降级/失败 状态可销毁",
+        () => destroyInstance());
+      if (busy) {
+        hint.textContent = "该实例有任务执行中,操作按钮已置灰(后端并发保护:任务进行中拒绝其它操作)。";
+      } else if (i.status === "degraded" || i.status === "failed") {
+        hint.textContent = "实例处于" + (STATUS_LABEL[i.status] || i.status) + ",可执行「销毁实例」清理残留后重建;巡检恢复后自动回到 运行中。";
+      } else if (i.status === "running") {
+        hint.textContent = "扩容只对 运行中 生效;销毁不可恢复(删除全部容器与网络)。";
+      } else {
+        hint.textContent = "当前状态为 " + (STATUS_LABEL[i.status] || i.status) + ",不允许生命周期操作。";
+      }
+    }
+    async function refreshDetail() {
+      if (!current) return;
+      try {
+        const d = await jget("/api/rds/instance?name=" + encodeURIComponent(current));
+        const i = d.instance;
+        const title = document.getElementById("detail-title");
+        title.textContent = "";
+        title.appendChild(document.createTextNode("实例 " + i.name + "  "));
+        title.appendChild(el("span", "badge " + (STATUS_CLS[i.status] || ""), STATUS_LABEL[i.status] || i.status));
+        renderOps(i);
+        const reason = document.getElementById("detail-reason");
+        if (i.last_error) {
+          reason.textContent = "健康/异常: " + i.last_error;
+          reason.style.display = "block";
+        } else {
+          reason.style.display = "none";
+        }
+        // 拓扑:proxy → master → slaves
+        const topo = document.getElementById("detail-topo");
+        topo.innerHTML = "";
+        const proxyBox = el("div", "box");
+        proxyBox.appendChild(el("div", "t", "newproxy"));
+        proxyBox.appendChild(el("div", "n", (i.proxy && i.proxy.container) || "-"));
+        proxyBox.appendChild(el("div", "t", "MySQL :" + (i.proxy ? i.proxy.mysql_port : "?") + " · 管理 :" + (i.proxy ? i.proxy.mng_port : "?")));
+        topo.appendChild(proxyBox);
+        topo.appendChild(el("div", "arrow", "↓"));
+        const master = (i.nodes || []).find(n => n.role === "master");
+        const mb = el("div", "box");
+        mb.appendChild(el("div", "t", "MySQL 主"));
+        mb.appendChild(el("div", "n", master ? master.container : "-"));
+        mb.appendChild(el("div", "t", "server-id " + (master ? master.server_id : "-") + " · :" + (master ? master.host_port : "?")));
+        topo.appendChild(mb);
+        for (const s of (i.nodes || []).filter(n => n.role !== "master")) {
+          topo.appendChild(el("div", "arrow", "↓"));
+          const sb = el("div", "box");
+          sb.appendChild(el("div", "t", s.role_label));
+          sb.appendChild(el("div", "n", s.container));
+          sb.appendChild(el("div", "t", "server-id " + s.server_id + " · :" + s.host_port));
+          topo.appendChild(sb);
+        }
+        // 任务
+        const t2 = await jget("/api/rds/tasks?instance=" + encodeURIComponent(current));
+        renderTasks(t2.tasks || [], document.getElementById("detail-tasks"));
+      } catch (e) { /* 实例可能已销毁 */ }
+    }
+
+    // ─── 操作 ───
+    async function destroyInstance() {
+      if (!current) return;
+      if (!confirm("确认销毁实例 " + current + " ?该操作不可恢复(删除全部容器与网络)")) return;
+      try {
+        const d = await jpost("/api/rds/destroy?name=" + encodeURIComponent(current));
+        toast("销毁任务已提交: " + d.task_id);
+        refresh();
+      } catch (e) { toast(e.message, false); }
+    }
+    async function scaleout(role) {
+      if (!current) return;
+      try {
+        const d = await jpost("/api/rds/scaleout?name=" + encodeURIComponent(current) + "&role=" + role);
+        toast("扩容任务已提交: " + d.task_id);
+        refresh();
+      } catch (e) { toast(e.message, false); }
+    }
+
+    // ─── 任务渲染(DAG 节点,运行中任务自动展开) ───
+    let pinnedUntil = 0; // 用户手动展开后短暂不被自动跟随打断
+    let userClosed = false;
+
+    function autoExpand(tasks) {
+      if (!tasks.length) return;
+      const ids = new Set(tasks.map(t => t.id));
+      if (expandedTask !== null && !ids.has(expandedTask)) expandedTask = null;
+      if (Date.now() < pinnedUntil) return;
+      const newestRunning = tasks.find(t => t.status === "running") || null;
+      if (newestRunning) {
+        const cur = tasks.find(t => t.id === expandedTask);
+        if (!cur || cur.status !== "running") {
+          expandedTask = newestRunning.id;
+          userClosed = false;
+        }
+      } else if (expandedTask === null && !userClosed) {
+        expandedTask = tasks[0].id; // 无展开时展示最新任务
+      }
+    }
+
+    async function cancelTask(id, ev) {
+      if (ev) ev.stopPropagation();
+      try {
+        await jpost("/api/rds/cancel?task=" + encodeURIComponent(id));
+        toast("已请求取消任务 " + id);
+        refresh();
+      } catch (e) { toast(e.message, false); }
+    }
+
+    // ─── 任务筛选(全局任务面板;服务端当前上限 300 条历史) ───
+    function taskFilterMatches(t) {
+      const inst = (document.getElementById("tf-instance").value || "").trim().toLowerCase();
+      const kind = document.getElementById("tf-kind").value;
+      const st = document.getElementById("tf-status").value;
+      const q = (document.getElementById("tf-q").value || "").trim().toLowerCase();
+      if (inst && !(t.instance || "").toLowerCase().includes(inst)) return false;
+      if (kind && t.kind !== kind) return false;
+      if (st && t.status !== st) return false;
+      if (q) {
+        const hay = ((t.id || "") + " " + (t.kind || "") + " " + (t.instance || "") + " " +
+          (t.nodes || []).map(n => n.name || "").join(" ")).toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    }
+    function filteredTasks(tasks) {
+      const src = tasks || [];
+      const fl = src.filter(taskFilterMatches);
+      const total = document.getElementById("task-total");
+      if (total) total.textContent = "显示 " + fl.length + " / " + src.length + " 条(服务端近 300 条)";
+      return fl;
+    }
+    function renderTaskPanel() {
+      renderTasks(filteredTasks(allTasks), document.getElementById("tasks"));
+    }
+    function resetTaskFilters() { renderTaskPanel(); }
+    function clearTaskFilters() {
+      document.getElementById("tf-instance").value = "";
+      document.getElementById("tf-kind").value = "";
+      document.getElementById("tf-status").value = "";
+      document.getElementById("tf-q").value = "";
+      renderTaskPanel();
+    }
+
+    function renderTasks(tasks, container) {
+      container.innerHTML = "";
+      if (!tasks.length) {
+        container.innerHTML = container.id === "tasks"
+          ? '<div class="empty">还没有任务记录。到「实例」页发起创建 / 扩容 / 销毁,任务会出现在这里。</div>'
+          : '<div class="empty">该实例暂无任务。</div>';
+        return;
+      }
+      autoExpand(tasks);
+      for (const t of tasks) {
+        const wrap = el("div", "task");
+        const head = el("div", "task-head");
+        const stCls = NODE_ST[t.status] || ["st-pending", t.status];
+        head.appendChild(el("span", "st " + stCls[0], stCls[1]));
+        head.appendChild(el("b", "", (KIND_CN[t.kind] || t.kind || "任务") + " · " + t.instance));
+        head.appendChild(el("span", "mono", "id=" + t.id));
+        head.appendChild(el("span", "mono", fmtTime(t.created_at)));
+        if (t.status === "running") {
+          const cb = el("button", "ghost", "取消");
+          cb.onclick = (ev) => cancelTask(t.id, ev);
+          head.appendChild(cb);
+        }
+        head.onclick = () => {
+          expandedTask = expandedTask === t.id ? null : t.id;
+          userClosed = expandedTask === null;
+          pinnedUntil = Date.now() + 4000;
+          renderTasks(tasks, container);
+        };
+        wrap.appendChild(head);
+        if (expandedTask === t.id) {
+          const body = el("div", "task-body");
+          const nodes = (t.nodes || []).slice().sort((a, b) => {
+            // 拓扑序:依赖少的在前
+            return (a.deps || []).length - (b.deps || []).length;
+          });
+          for (const n of nodes) {
+            const row = el("div", "node-row");
+            const st = NODE_ST[n.status] || ["st-pending", n.status];
+            row.appendChild(el("span", "st " + st[0], st[1]));
+            row.appendChild(el("span", "", n.name + " <span style='color:#5a6675;font-size:11px'>(" + n.id + ")</span>"));
+            if (n.attempts > 1) row.appendChild(el("span", "", "重试×" + (n.attempts - 1) + " <span style='color:#ffcc00;'>⚠</span>"));
+            body.appendChild(row);
+            if (n.output) {
+              const out = el("div", "node-output", n.output);
+              body.appendChild(out);
+            }
+          }
+          wrap.appendChild(body);
+        }
+        container.appendChild(wrap);
+      }
+    }
+
+    // ─── 刷新(分视图懒加载:实例列表仅列表视图可见时拉取,分页) ───
+    async function refresh() {
+      try {
+        const t = await jget("/api/rds/tasks");
+        allTasks = t.tasks || [];
+        const overviewShown = document.getElementById("overview-view").style.display !== "none";
+        const listShown = document.getElementById("list-view").style.display !== "none";
+        const tasksShown = document.getElementById("tasks-view").style.display !== "none";
+        const auditShown = document.getElementById("audit-view").style.display !== "none";
+        const detailShown = document.getElementById("detail-view").style.display !== "none";
+        if (tasksShown) renderTaskPanel();
+        if (listShown) refreshInstances();
+        if (overviewShown) loadOverview();
+        if (detailShown && current) refreshDetail();
+        if (auditShown) refreshAudit();
+      } catch (e) { /* 未登录等 */ }
+    }
+    applyRouteFromHash(); // 依据 hash 进入对应视图(默认列表)
+    setInterval(refresh, 2000);
+  </script>
+</body>
+
+</html>

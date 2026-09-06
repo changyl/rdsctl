@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <title>登录 — RDS 管控</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: #0f1419;
+      color: #d7dee8;
+      font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+
+    .box {
+      background: #1a2029;
+      border: 1px solid #2a3342;
+      border-radius: 10px;
+      padding: 32px 36px;
+      width: 320px;
+    }
+
+    h1 {
+      font-size: 17px;
+      margin-bottom: 4px;
+    }
+
+    .sub {
+      color: #8b98ab;
+      font-size: 12px;
+      margin-bottom: 22px;
+    }
+
+    label {
+      display: block;
+      color: #8b98ab;
+      font-size: 12px;
+      margin: 12px 0 4px;
+    }
+
+    input {
+      width: 100%;
+      background: #0f1419;
+      border: 1px solid #2a3342;
+      border-radius: 6px;
+      color: #d7dee8;
+      padding: 9px 11px;
+      font-size: 14px;
+      outline: none;
+    }
+
+    input:focus {
+      border-color: #4f8cff;
+    }
+
+    button {
+      width: 100%;
+      margin-top: 20px;
+      background: #4f8cff;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 10px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      filter: brightness(1.12);
+    }
+
+    .err {
+      color: #ff3b30;
+      font-size: 12px;
+      margin-top: 10px;
+      min-height: 16px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="box">
+    <h1>Orbit管理面板</h1>
+    <div class="sub">请输入管理凭据（mng_user / mng_password）</div>
+    <form id="login-form" method="post" action="/login">
+      <label for="user">用户名</label>
+      <input id="user" name="user" autocomplete="username" autofocus required>
+      <label for="password">密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">登 录</button>
+      <div class="err" id="err"></div>
+    </form>
+  </div>
+  <script>
+    document.getElementById("login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const err = document.getElementById("err");
+      const form = e.target;
+      try {
+        const body = new URLSearchParams(new FormData(form));
+        const r = await fetch("/login", { method: "POST", body });
+        if (r.ok) { location.href = location.pathname || "/"; return; }
+        const t = await r.text();
+        err.textContent = t || ("登录失败 (HTTP " + r.status + ")");
+      } catch (ex) { err.textContent = String(ex); }
+    });
+  </script>
+</body>
+
+</html>
