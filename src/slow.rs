@@ -139,15 +139,23 @@ pub fn rule_hit(total_ms: u64, count: u64, avg_ms: u64) -> bool {
 
 /// WHERE/ORDER BY 终止词(收集谓词列时截断用)
 const CLAUSE_BOUNDS: &[&str] = &[
-    " order by ", " group by ", " limit ", " offset ", " having ", " union ",
-    " returning ", " fetch ", " for ", " window ",
+    " order by ",
+    " group by ",
+    " limit ",
+    " offset ",
+    " having ",
+    " union ",
+    " returning ",
+    " fetch ",
+    " for ",
+    " window ",
 ];
 
 /// 保留词/非列 token(启发式过滤;仅作建议提示,非完备 SQL 解析)
 const NON_COLS: &[&str] = &[
-    "select", "from", "where", "order", "group", "by", "limit", "offset", "having", "union",
-    "and", "or", "not", "in", "like", "between", "is", "null", "asc", "desc", "true", "false",
-    "then", "when", "else", "end", "case", "join", "left", "right", "inner", "outer", "on", "as",
+    "select", "from", "where", "order", "group", "by", "limit", "offset", "having", "union", "and",
+    "or", "not", "in", "like", "between", "is", "null", "asc", "desc", "true", "false", "then",
+    "when", "else", "end", "case", "join", "left", "right", "inner", "outer", "on", "as",
     "distinct", "if", "coalesce", "count", "sum", "avg", "min", "max", "date", "interval",
     "exists", "values", "set", "update", "delete", "insert", "into", "for", "wait",
 ];
@@ -176,7 +184,9 @@ pub fn candidate_columns(text: &str) -> Vec<String> {
             let t = col.trim().to_string();
             tok.clear();
             if t.is_empty()
-                || t.chars().next().map_or(true, |c| !(c.is_ascii_alphabetic() || c == '_'))
+                || t.chars()
+                    .next()
+                    .map_or(true, |c| !(c.is_ascii_alphabetic() || c == '_'))
                 || t.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '_'))
                 || NON_COLS.contains(&t.as_str())
                 || out.iter().any(|x| x == &t)
@@ -326,7 +336,13 @@ async fn digest_selfcheck(container: &str) -> String {
             .trim()
             .to_string()
     };
-    if let Ok(o) = dk::exec_mysql_local(container, "root", ROOT_PASS, "SHOW VARIABLES LIKE 'performance_schema'").await
+    if let Ok(o) = dk::exec_mysql_local(
+        container,
+        "root",
+        ROOT_PASS,
+        "SHOW VARIABLES LIKE 'performance_schema'",
+    )
+    .await
     {
         if val_of(&o).eq_ignore_ascii_case("OFF") {
             return "performance_schema=OFF(digest 汇总不采集;需开启并重启 MySQL)".to_string();
@@ -357,7 +373,8 @@ async fn digest_selfcheck(container: &str) -> String {
             return "语句级 instrument(statement/sql/*)被禁用(digest 不累计)".to_string();
         }
     }
-    "digest 表当前为空:实例上尚未实际执行过 SQL,或表被 TRUNCATE/重置(产生真实语句后会自动累计)".to_string()
+    "digest 表当前为空:实例上尚未实际执行过 SQL,或表被 TRUNCATE/重置(产生真实语句后会自动累计)"
+        .to_string()
 }
 
 /// 限频诊断日志(每实例节点 10 分钟内至多一条,避免周期采集刷屏)
@@ -383,7 +400,14 @@ async fn diagnose_node(inst: &str, container: &str, err: Option<String>) {
     }
     let why = digest_selfcheck(container).await;
     let msg = match err {
-        Some(e) => format!("慢查采集失败: {e}{}", if why.is_empty() { String::new() } else { format!("; 诊断:{why}") }),
+        Some(e) => format!(
+            "慢查采集失败: {e}{}",
+            if why.is_empty() {
+                String::new()
+            } else {
+                format!("; 诊断:{why}")
+            }
+        ),
         None if !why.is_empty() => format!("慢查 digest 无数据诊断: {why}"),
         None => return,
     };
@@ -425,12 +449,7 @@ async fn collect_once() {
         .store
         .slow_baselines_load()
         .into_iter()
-        .map(|b: SlowBase| {
-            (
-                (b.instance, b.node, b.digest),
-                (b.count_star, b.sum_ms),
-            )
-        })
+        .map(|b: SlowBase| ((b.instance, b.node, b.digest), (b.count_star, b.sum_ms)))
         .collect();
     let all_nodes = std::env::var("RDSCTL_SLOW_NODES").as_deref() == Ok("all");
     let timeout = env_u64("RDSCTL_QUERY_TIMEOUT_SECS", 20).max(10);
@@ -448,7 +467,8 @@ async fn collect_once() {
             }
         }
         for (container, role) in targets {
-            let out = match dk::query_table(&container, "root", ROOT_PASS, DIGEST_SQL, timeout, "").await
+            let out = match dk::query_table(&container, "root", ROOT_PASS, DIGEST_SQL, timeout, "")
+                .await
             {
                 Ok(o) => o,
                 Err(e) => {
@@ -464,8 +484,25 @@ async fn collect_once() {
             }
             let cols: Vec<String> = parsed.columns.iter().map(|s| s.to_lowercase()).collect();
             let idx = |name: &str| cols.iter().position(|c| c == name);
-            let (Some(i_schema), Some(i_digest), Some(i_text), Some(i_count), Some(i_sum), Some(i_max), Some(i_first), Some(i_last)) =
-                (idx("schema_name"), idx("digest"), idx("digest_text"), idx("count_star"), idx("sum_ms"), idx("max_ms"), idx("first_seen"), idx("last_seen"))
+            let (
+                Some(i_schema),
+                Some(i_digest),
+                Some(i_text),
+                Some(i_count),
+                Some(i_sum),
+                Some(i_max),
+                Some(i_first),
+                Some(i_last),
+            ) = (
+                idx("schema_name"),
+                idx("digest"),
+                idx("digest_text"),
+                idx("count_star"),
+                idx("sum_ms"),
+                idx("max_ms"),
+                idx("first_seen"),
+                idx("last_seen"),
+            )
             else {
                 continue;
             };
@@ -505,7 +542,11 @@ async fn collect_once() {
                         digest_text: val_str(&row[i_text]),
                         count_star: delta_count,
                         sum_ms: delta_sum,
-                        avg_ms: if delta_count > 0 { delta_sum / delta_count } else { 0 },
+                        avg_ms: if delta_count > 0 {
+                            delta_sum / delta_count
+                        } else {
+                            0
+                        },
                         max_ms: val_u64(&row[i_max]),
                         first_seen: val_u64(&row[i_first]),
                         last_seen: val_u64(&row[i_last]),
@@ -529,7 +570,10 @@ async fn collect_once() {
     let n = now();
     let since = n - 24 * 3600;
     let rows = m.store.slow_window(since, None, None, 200_000);
-    let prev = prev_total_ms(&m.store.slow_window(n - 48 * 3600, None, None, 200_000), since);
+    let prev = prev_total_ms(
+        &m.store.slow_window(n - 48 * 3600, None, None, 200_000),
+        since,
+    );
     let min_count = env_u64("RDSCTL_SLOW_MIN_COUNT", 10);
     let avg_t = env_u64("RDSCTL_SLOW_AVG_MS", 1000);
     let max_t = env_u64("RDSCTL_SLOW_MAX_MS", 5000);
@@ -549,8 +593,8 @@ async fn collect_once() {
                 None
             }
         });
-        let rising = grow_pct > 0 && count >= min_count
-            && rising_pct.map_or(false, |v| v >= grow_pct);
+        let rising =
+            grow_pct > 0 && count >= min_count && rising_pct.map_or(false, |v| v >= grow_pct);
         if !rule_hit(total_ms, count, avg_ms) && !rising {
             continue;
         }
@@ -573,8 +617,9 @@ async fn collect_once() {
         }
         // 规则版建议:新开行必写;既有行仅 rising 变化时刷新(防周期刷写)
         if opened || rising {
-            let advice =
-                build_advice(text, total_ms, count, avg_ms, max_ms, avg_t, max_t, rising_pct);
+            let advice = build_advice(
+                text, total_ms, count, avg_ms, max_ms, avg_t, max_t, rising_pct,
+            );
             let hit = m.store.slow_gov_advise(digest, &advice.to_string());
             if !hit {
                 tracing::debug!("slow_gov_advise 未命中(digest={digest} 治理行可能已 closed)");
@@ -628,11 +673,12 @@ pub fn start(mgr: &Arc<RdsManager>) {
 pub fn top_view(window: &str, instance: Option<&str>, min_count: u64, top: usize) -> (u16, Value) {
     let n = now();
     let Some(since) = window_since(window, n) else {
-        return (400, json!({ "ok": false, "error": "未知 window(支持 24h/7d)" }));
+        return (
+            400,
+            json!({ "ok": false, "error": "未知 window(支持 24h/7d)" }),
+        );
     };
-    let rows = manager()
-        .store
-        .slow_window(since, instance, None, 200_000);
+    let rows = manager().store.slow_window(since, instance, None, 200_000);
     let mut items = aggregate_window(&rows, min_count);
     items.truncate(top.max(1).min(500));
     let masked = !crate::auth::has_perm("instances.query");
@@ -648,16 +694,17 @@ pub fn top_view(window: &str, instance: Option<&str>, min_count: u64, top: usize
 }
 
 /// 单实例明细(同上文本规则)
-pub fn instance_view(
-    inst: &str,
-    window: &str,
-    limit: usize,
-) -> (u16, Value) {
+pub fn instance_view(inst: &str, window: &str, limit: usize) -> (u16, Value) {
     let n = now();
     let Some(since) = window_since(window, n) else {
-        return (400, json!({ "ok": false, "error": "未知 window(支持 24h/7d)" }));
+        return (
+            400,
+            json!({ "ok": false, "error": "未知 window(支持 24h/7d)" }),
+        );
     };
-    let rows = manager().store.slow_window(since, Some(inst), None, 200_000);
+    let rows = manager()
+        .store
+        .slow_window(since, Some(inst), None, 200_000);
     let mut items = aggregate_window(&rows, 0);
     items.sort_by(|a, b| {
         b["total_ms"]
@@ -676,7 +723,10 @@ pub fn instance_view(
 pub fn trend_view(digest: &str, window: &str) -> (u16, Value) {
     let n = now();
     let Some(since) = window_since(window, n) else {
-        return (400, json!({ "ok": false, "error": "未知 window(支持 24h/7d)" }));
+        return (
+            400,
+            json!({ "ok": false, "error": "未知 window(支持 24h/7d)" }),
+        );
     };
     let rows = manager()
         .store
@@ -692,7 +742,10 @@ pub fn trend_view(digest: &str, window: &str) -> (u16, Value) {
 pub fn advice_view(digest: &str, window: &str, top: usize) -> (u16, Value) {
     let n = now();
     let Some(since) = window_since(window, n) else {
-        return (400, json!({ "ok": false, "error": "未知 window(支持 24h/7d)" }));
+        return (
+            400,
+            json!({ "ok": false, "error": "未知 window(支持 24h/7d)" }),
+        );
     };
     let rows = manager().store.slow_window(since, None, None, 200_000);
     let items = aggregate_window(&rows, 0);
@@ -728,7 +781,10 @@ pub fn advice_view(digest: &str, window: &str, top: usize) -> (u16, Value) {
             json!({ "ok": false, "error": "该 digest 窗口内无数据或未命中治理规则" }),
         );
     }
-    (200, json!({ "ok": true, "items": out, "window_since": since, "now": n }))
+    (
+        200,
+        json!({ "ok": true, "items": out, "window_since": since, "now": n }),
+    )
 }
 
 // ─── 单元测试(纯聚合/趋势/规则;无 docker/MySQL) ───
@@ -800,20 +856,41 @@ mod tests {
         assert!(upd.contains(&"name".to_string())); // 非保留词即候选(列名提示用)
         assert!(!upd.iter().any(|c| c == "like" || c == "update"));
         // 去重 + 上限
-        assert_eq!(candidate_columns("select * from t where a = ? and a = ? and b = ? and c = ? and d = ? and e = ?").len(), 4);
+        assert_eq!(
+            candidate_columns(
+                "select * from t where a = ? and a = ? and b = ? and c = ? and d = ? and e = ?"
+            )
+            .len(),
+            4
+        );
     }
 
     #[test]
     fn advice_reasons_and_suggestions() {
         // 未超阈值(阈值显式传入)→ 无原因,仅兜底 verify
-        let a = build_advice("select count(*) from t", 5_000, 20, 200, 900, 1_000, 5_000, None);
+        let a = build_advice(
+            "select count(*) from t",
+            5_000,
+            20,
+            200,
+            900,
+            1_000,
+            5_000,
+            None,
+        );
         assert!(a["reasons"].as_array().unwrap().is_empty());
         let sug = a["suggestions"].as_array().unwrap();
         assert_eq!(sug[0]["type"], "verify");
         // avg + rising 命中 → 原因/建议/rising_pct
         let a2 = build_advice(
-            "select * from t where a = ?", 20_000, 20, 1_000, 3_000,
-            1_000, 5_000, Some(300),
+            "select * from t where a = ?",
+            20_000,
+            20,
+            1_000,
+            3_000,
+            1_000,
+            5_000,
+            Some(300),
         );
         let txt: String = a2["reasons"]
             .as_array()
@@ -830,14 +907,17 @@ mod tests {
         assert!(sug2.iter().any(|s| s["type"] == "verify"));
         // 峰值命中
         let a3 = build_advice("select ...", 1_000, 20, 50, 9_000, 1_000, 5_000, None);
-        assert!(a3["reasons"].as_array().unwrap()[0].as_str().unwrap().contains("峰值"));
+        assert!(a3["reasons"].as_array().unwrap()[0]
+            .as_str()
+            .unwrap()
+            .contains("峰值"));
     }
 
     #[test]
     fn prev_window_totals_cut() {
         let rows = vec![
-            row(100, "a", "d1", "t", 5, 500, 100),   // 前序窗(ts < cut)
-            row(100, "a", "d2", "t", 1, 40, 40),     // 前序窗
+            row(100, "a", "d1", "t", 5, 500, 100),     // 前序窗(ts < cut)
+            row(100, "a", "d2", "t", 1, 40, 40),       // 前序窗
             row(1_000, "a", "d1", "t", 5, 1_000, 200), // 当前窗:不计
         ];
         let m = prev_total_ms(&rows, 500);

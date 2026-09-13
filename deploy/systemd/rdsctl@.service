@@ -1,0 +1,58 @@
+[Unit]
+# rdsctl 控制面节点(systemd 模板单元;%i = 节点标识,例如 node1)
+#
+# 为什么必须有守护:设计文档 control-plane-ha-design.md 的正确性前提 A5 ——
+# 控制器崩溃后必须被重新拉起,否则"3 副本"会静默退化为 2 副本、再退化为 1 副本,
+# 高可用目标 G2 不成立。本单元就是该前提在仓库内的落地。
+#
+Description=rdsctl control-plane node (%i)
+Documentation=file:///opt/rdsctl/docs/control-plane-ha-design.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rdsctl
+Group=rdsctl
+# docker CLI 需要访问 /var/run/docker.sock,故加入 docker 组
+SupplementaryGroups=docker
+WorkingDirectory=/opt/rdsctl
+
+# 全局配置 + 每节点配置(后者覆盖前者):
+#   RDSCTL_PORT / RDSCTL_USER / RDSCTL_PASS / RDSCTL_MYSQL_* / ...
+#   RDSCTL_ARGS  单机: --port 9113
+#               集群: serve --roles=gateway,controller,ingress --node-id=%i \
+#                       --cluster=1@10.0.0.1:9330,2@10.0.0.2:9330,3@10.0.0.3:9330 --shards=0-9
+#   RDSCTL_NODE_ID / RDSCTL_CLUSTER / RDSCTL_SHARDS / RDSCTL_DATA_DIR / RDSCTL_MAX_SKEW_MS
+EnvironmentFile=-/etc/rdsctl/rdsctl.env
+EnvironmentFile=-/etc/rdsctl/%i.env
+
+# 启动前自检(时钟偏移 / fsync / 多数派可达 / agent 可达 / 集群配置合法性)。
+# 退出码 2 = 正确性前提不达标 → 拒绝启动(见 deploy/README.md 的退出码约定)。
+ExecStartPre=/opt/rdsctl/deploy/bin/rdsctl-preflight.sh %i
+ExecStart=/opt/rdsctl/rdsctl $RDSCTL_ARGS
+
+# 崩溃自动拉起(核心语义:高可用的"最后一环")
+Restart=always
+RestartSec=2
+# 前提类错误(2)不做自动重启,交由人工介入,避免无意义重启风暴
+RestartPreventExitStatus=2
+# 其它反复崩溃的速率限制:60s 内超过 10 次则进入 failed,不再无限重启
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+# 优雅停止:集群模式应在此窗口内让位(stepdown)并落盘
+KillSignal=SIGTERM
+TimeoutStopSec=30
+KillMode=mixed
+
+StandardOutput=append:/var/log/rdsctl/%i.log
+StandardError=append:/var/log/rdsctl/%i.log
+
+# 可选加固(启用前确认 docker CLI 与 agent 仍可正常工作):
+# NoNewPrivileges=yes
+# PrivateTmp=yes
+# ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

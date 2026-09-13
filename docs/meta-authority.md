@@ -21,6 +21,11 @@
 | ② 健康事实 | `node_states`(ok/stopped/down/missing/repl_down)+ 实例 `status` | 健康巡检 | 仅变化时 | 节点着色/角标、降级、操作可用性 |
 | ③ LVS 接入层 | VIP→proxies 宿主端口转发 | 进程内 lvs.rs(由 ① 派生) | 不持久 | 接入层连通 |
 
+> **多副本补充(仅 `RDSCTL_MODE=cluster`)**:① 的实例级互斥由**共识租约 + fence** 保证
+> (不再是 DB 行锁),② 的状态跃迁与 ERS 触发以**多数派提交的顺序**(`(term, index)`)为权威
+> 顺序,副作用命令必须携带 fence 并由执行面(agent)强制校验。`RDSCTL_MODE=single` 时本表
+> 语义不变。详见 [control-plane-ha-design.md](./control-plane-ha-design.md) §3/§5/§9。
+
 ## 3. 权威分层(决策)
 
 1. **结构骨架 = rdsctl 登记权威**:实例由哪些容器组成、分片、规格/标签/租户、Proxy/DTS 归属。orchestrator 不提供这些业务概念;漂移只告警,不改结构。

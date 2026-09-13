@@ -25,18 +25,19 @@ pub const PERMISSIONS: &[&str] = &[
     "instances.create",
     "instances.destroy",
     "instances.scaleout",
-    "instances.manage", // 启停 / 批量
-    "instances.query",      // SQL 查询台:只读语句(低权账号执行,全审计)
+    "instances.manage",      // 启停 / 批量
+    "instances.query",       // SQL 查询台:只读语句(低权账号执行,全审计)
     "instances.query.write", // SQL 查询台:写语句(需在只读权限之上显式授予;仍强制 master + 全审计)
     "tasks.view",
     "tasks.cancel",
     "tasks.manage", // 草稿创建/编辑/启动 + 删除归档
-
     "audit.view",
     "alerts.view",
     "alerts.handle",
     "users.manage",
     "roles.manage",
+    "cluster.view",   // 管控集群:成员/角色/term/复制进度/租约台账(只读)
+    "cluster.manage", // 管控集群:主动让位 / 重建 sink 投影(控制面运维动作)
 ];
 
 fn rbac_default_creds() -> (String, String) {
@@ -130,6 +131,8 @@ pub trait StoreBackend: Send + Sync {
     fn renew_instance_lock(&self, name: &str, holder: &str, lease_secs: u64) -> bool;
     /// 释放:仅持有者可释放
     fn unlock_instance(&self, name: &str, holder: &str);
+    /// 是否已存在带该标记的审计行(sink 投影幂等判定;设计 §12)
+    fn audit_marker_exists(&self, marker: &str) -> bool;
     /// 清空全部实例锁(单控制端 lab 模型:非续跑模式启动恢复时调用,
     /// 清理宕机控制端的孤儿 lease;多活模式由 M1 leader 只清持有者过期行)
     fn clear_all_locks(&self);
@@ -144,6 +147,9 @@ pub trait StoreBackend: Send + Sync {
     fn user_enabled(&self, user: &str) -> bool;
     /// 用户列表(含角色与有效权限,不含口令)
     fn users_list(&self) -> Vec<Value>;
+    /// **原始**用户记录(含 salt/pass_hash;仅供 cluster 模式首次把 RBAC 灌入共识状态机)。
+    /// 绝不经任何 HTTP 响应泄露:接口层从不调用它。
+    fn users_raw(&self) -> Vec<Value>;
     /// 创建/更新用户(更新时 salt/pass 覆盖)
     fn user_upsert(&self, user: &str, salt: &str, pass_hash: &str, enabled: bool);
     fn user_set_enabled(&self, user: &str, enabled: bool);
@@ -386,7 +392,6 @@ pub struct CapSample {
     pub data_gib: f64,
 }
 
-
 /// 对调用方暴露的持久化句柄(既有代码保持 `Arc<Store>` 用法不变)
 pub struct Store {
     backend: Arc<dyn StoreBackend>,
@@ -427,7 +432,8 @@ impl Store {
         started: Option<u64>,
         finished: Option<u64>,
     ) {
-        self.backend.upsert_task(id, kind, instance, status, created, started, finished)
+        self.backend
+            .upsert_task(id, kind, instance, status, created, started, finished)
     }
     pub fn update_task_status(&self, id: &str, status: &str, finished: Option<u64>) {
         self.backend.update_task_status(id, status, finished)
@@ -448,8 +454,18 @@ impl Store {
         finished: Option<u64>,
     ) {
         self.backend.upsert_node(
-            task_id, node_id, name, deps_json, steps_json, status, output, attempts, retries,
-            timeout_secs, started, finished,
+            task_id,
+            node_id,
+            name,
+            deps_json,
+            steps_json,
+            status,
+            output,
+            attempts,
+            retries,
+            timeout_secs,
+            started,
+            finished,
         )
     }
     pub fn mark_interrupted(&self) -> usize {
@@ -482,7 +498,8 @@ impl Store {
         result: &str,
         task_id: &str,
     ) {
-        self.backend.audit(user, instance, action, params, result, task_id)
+        self.backend
+            .audit(user, instance, action, params, result, task_id)
     }
     pub fn audit_list(
         &self,
@@ -520,6 +537,9 @@ impl Store {
     pub fn unlock_instance(&self, name: &str, holder: &str) {
         self.backend.unlock_instance(name, holder)
     }
+    pub fn audit_marker_exists(&self, marker: &str) -> bool {
+        self.backend.audit_marker_exists(marker)
+    }
     pub fn clear_all_locks(&self) {
         self.backend.clear_all_locks()
     }
@@ -534,6 +554,10 @@ impl Store {
     }
     pub fn users_list(&self) -> Vec<Value> {
         self.backend.users_list()
+    }
+    /// 原始用户记录(含口令摘要)—— 仅 main.rs 的 cluster 引导灌入使用
+    pub fn users_raw(&self) -> Vec<Value> {
+        self.backend.users_raw()
     }
     pub fn user_upsert(&self, user: &str, salt: &str, pass_hash: &str, enabled: bool) {
         self.backend.user_upsert(user, salt, pass_hash, enabled)
@@ -606,8 +630,16 @@ impl Store {
         last_error: &str,
         spec: &str,
     ) {
-        self.backend
-            .dts_upsert(instance, node, engine, container, target_label, status, last_error, spec)
+        self.backend.dts_upsert(
+            instance,
+            node,
+            engine,
+            container,
+            target_label,
+            status,
+            last_error,
+            spec,
+        )
     }
     pub fn dts_remove(&self, instance: &str, node: &str) -> bool {
         self.backend.dts_remove(instance, node)
@@ -625,8 +657,9 @@ impl Store {
         agent_port: u16,
         status: &str,
     ) {
-        self.backend
-            .host_upsert(name, ip, region, az, rack, cpu_cores, mem_gb, disk_gb, agent_port, status)
+        self.backend.host_upsert(
+            name, ip, region, az, rack, cpu_cores, mem_gb, disk_gb, agent_port, status,
+        )
     }
     pub fn host_list(&self) -> Vec<Value> {
         self.backend.host_list()
@@ -641,7 +674,8 @@ impl Store {
         self.backend.audit_since(since, limit)
     }
     pub fn evidence_insert(&self, instance: &str, kind: &str, reason: &str, facts_json: &str) {
-        self.backend.evidence_insert(instance, kind, reason, facts_json)
+        self.backend
+            .evidence_insert(instance, kind, reason, facts_json)
     }
     pub fn evidence_latest(&self, instance: &str, n: usize) -> Vec<Value> {
         self.backend.evidence_latest(instance, n)
@@ -664,8 +698,17 @@ impl Store {
         err_summary: &str,
     ) {
         self.backend.query_audit_insert(
-            user, instance, node, sql, sql_hash, read_only, rows_returned, rows_truncated,
-            elapsed_ms, ok, err_summary,
+            user,
+            instance,
+            node,
+            sql,
+            sql_hash,
+            read_only,
+            rows_returned,
+            rows_truncated,
+            elapsed_ms,
+            ok,
+            err_summary,
         )
     }
     pub fn query_audit_list(
@@ -732,7 +775,8 @@ impl Store {
         next_at: u64,
         last_error: &str,
     ) {
-        self.backend.backup_outbox_mark(id, state, attempts, next_at, last_error)
+        self.backend
+            .backup_outbox_mark(id, state, attempts, next_at, last_error)
     }
     pub fn backup_outbox_reg_state(&self, instance: Option<&str>) -> Vec<Value> {
         self.backend.backup_outbox_reg_state(instance)
@@ -746,7 +790,12 @@ impl Store {
     pub fn capacity_insert(&self, samples: &[CapSample]) {
         self.backend.capacity_insert(samples)
     }
-    pub fn capacity_since(&self, instance: Option<&str>, since_ts: u64, limit: usize) -> Vec<Value> {
+    pub fn capacity_since(
+        &self,
+        instance: Option<&str>,
+        since_ts: u64,
+        limit: usize,
+    ) -> Vec<Value> {
         self.backend.capacity_since(instance, since_ts, limit)
     }
     pub fn capacity_prune(&self, before_ts: u64) -> usize {
@@ -783,7 +832,14 @@ impl MysqlBackend {
         let user = env_or("RDSCTL_MYSQL_USER", "root");
         let pass = std::env::var("RDSCTL_MYSQL_PASS").unwrap_or_default();
         let db = env_or("RDSCTL_MYSQL_DB", "rdsctl");
-        let s = MysqlBackend { cli, host, port, user, pass, db };
+        let s = MysqlBackend {
+            cli,
+            host,
+            port,
+            user,
+            pass,
+            db,
+        };
 
         if let Err(e) = s.q0("SELECT 1") {
             panic!(
@@ -824,7 +880,8 @@ impl MysqlBackend {
             .map(|s| s.trim() == "1")
             .unwrap_or(false);
         if !has {
-            let sql = "ALTER TABLE rds_hosts ADD COLUMN agent_port INT NOT NULL DEFAULT 0 AFTER disk_gb";
+            let sql =
+                "ALTER TABLE rds_hosts ADD COLUMN agent_port INT NOT NULL DEFAULT 0 AFTER disk_gb";
             if let Err(e) = self.q0(sql) {
                 tracing::warn!("迁移 rds_hosts.agent_port 失败(表可能不存在,将随 DDL 新建): {e}");
             } else {
@@ -866,7 +923,9 @@ impl MysqlBackend {
         if !has {
             let sql = "ALTER TABLE slow_governance ADD COLUMN advice_json MEDIUMTEXT NULL AFTER resolved_at";
             if let Err(e) = self.q0(sql) {
-                tracing::warn!("迁移 slow_governance.advice_json 失败(表可能不存在,将随 DDL 新建): {e}");
+                tracing::warn!(
+                    "迁移 slow_governance.advice_json 失败(表可能不存在,将随 DDL 新建): {e}"
+                );
             } else {
                 tracing::info!("迁移:slow_governance 增加列 advice_json");
             }
@@ -936,7 +995,8 @@ impl MysqlBackend {
             if !has {
                 let sql = match idx {
                     "idx_instances_region" => {
-                        "ALTER TABLE instances ADD KEY idx_instances_region (region, status)".to_string()
+                        "ALTER TABLE instances ADD KEY idx_instances_region (region, status)"
+                            .to_string()
                     }
                     _ => "ALTER TABLE instances ADD KEY idx_instances_tenant (tenant)".to_string(),
                 };
@@ -959,8 +1019,17 @@ impl MysqlBackend {
     fn q0(&self, sql: &str) -> Result<String, String> {
         let mut cmd = Command::new(&self.cli);
         cmd.args([
-            "-h", &self.host, "-P", &self.port, "-u", &self.user, "--protocol=tcp",
-            "--batch", "--raw", "--skip-column-names", "--connect-timeout=5",
+            "-h",
+            &self.host,
+            "-P",
+            &self.port,
+            "-u",
+            &self.user,
+            "--protocol=tcp",
+            "--batch",
+            "--raw",
+            "--skip-column-names",
+            "--connect-timeout=5",
             "--default-character-set=utf8mb4",
         ]);
         if !self.pass.is_empty() {
@@ -982,7 +1051,13 @@ impl MysqlBackend {
     fn q_db(&self, sql: &str) -> Result<String, String> {
         let mut cmd = Command::new(&self.cli);
         cmd.args([
-            "-h", &self.host, "-P", &self.port, "-u", &self.user, "--protocol=tcp",
+            "-h",
+            &self.host,
+            "-P",
+            &self.port,
+            "-u",
+            &self.user,
+            "--protocol=tcp",
             "--connect-timeout=5",
         ]);
         if !self.pass.is_empty() {
@@ -1053,7 +1128,11 @@ impl StoreBackend for MysqlBackend {
         );
         self.q0(&sql)
             .ok()
-            .and_then(|s| s.lines().next().map(|l| l.trim().parse::<u64>().unwrap_or(0)))
+            .and_then(|s| {
+                s.lines()
+                    .next()
+                    .map(|l| l.trim().parse::<u64>().unwrap_or(0))
+            })
             .unwrap_or(0)
     }
 
@@ -1146,7 +1225,11 @@ impl StoreBackend for MysqlBackend {
         );
         self.q0(&sql)
             .ok()
-            .and_then(|s| s.lines().next().map(|l| l.trim().parse::<usize>().unwrap_or(0)))
+            .and_then(|s| {
+                s.lines()
+                    .next()
+                    .map(|l| l.trim().parse::<usize>().unwrap_or(0))
+            })
             .unwrap_or(0)
     }
 
@@ -1178,13 +1261,20 @@ impl StoreBackend for MysqlBackend {
             Self::task_json_object(),
             esc(id)
         );
-        self.q0(&sql)
-            .ok()
-            .and_then(|s| if s.is_empty() { None } else { serde_json::from_str(&s).ok() })
+        self.q0(&sql).ok().and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                serde_json::from_str(&s).ok()
+            }
+        })
     }
 
     fn delete_task(&self, id: &str) -> Result<(), String> {
-        let _ = self.q0(&format!("DELETE FROM task_nodes WHERE task_id='{}'", esc(id)))?;
+        let _ = self.q0(&format!(
+            "DELETE FROM task_nodes WHERE task_id='{}'",
+            esc(id)
+        ))?;
         let _ = self.q0(&format!("DELETE FROM tasks WHERE id='{}'", esc(id)))?;
         Ok(())
     }
@@ -1217,9 +1307,13 @@ impl StoreBackend for MysqlBackend {
              AS v FROM tasks t WHERE t.id='{}'",
             esc(id)
         );
-        self.q0(&sql)
-            .ok()
-            .and_then(|s| if s.is_empty() { None } else { serde_json::from_str(&s).ok() })
+        self.q0(&sql).ok().and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                serde_json::from_str(&s).ok()
+            }
+        })
     }
 
     fn audit(
@@ -1247,6 +1341,19 @@ impl StoreBackend for MysqlBackend {
         let r = self.q0(&sql);
         MysqlBackend::log_err("audit", &r);
     }
+
+    fn audit_marker_exists(&self, marker: &str) -> bool {
+        // params 以 "<marker> " 开头(见 ha::projection::marker)
+        let sql = format!(
+            "SELECT COUNT(*) FROM audit_log WHERE params LIKE '{} %'",
+            esc(marker)
+        );
+        match self.q0(&sql) {
+            Ok(s) => s.trim() != "0",
+            Err(_) => false,
+        }
+    }
+
 
     fn audit_list(
         &self,
@@ -1444,7 +1551,8 @@ impl StoreBackend for MysqlBackend {
     }
 
     fn slow_baselines_load(&self) -> Vec<SlowBase> {
-        let Ok(out) = self.q0("SELECT instance,node,digest,count_star,sum_ms,seen_at FROM slow_baselines")
+        let Ok(out) =
+            self.q0("SELECT instance,node,digest,count_star,sum_ms,seen_at FROM slow_baselines")
         else {
             return Vec::new();
         };
@@ -1590,7 +1698,11 @@ impl StoreBackend for MysqlBackend {
                 "DELETE FROM slow_digest_snapshots WHERE ts < {before_snap}; SELECT ROW_COUNT();"
             ))
             .ok()
-            .and_then(|s| s.lines().next().map(|l| l.trim().parse::<usize>().unwrap_or(0)))
+            .and_then(|s| {
+                s.lines()
+                    .next()
+                    .map(|l| l.trim().parse::<usize>().unwrap_or(0))
+            })
             .unwrap_or(0);
         let n2 = self
             .q0(&format!(
@@ -1613,7 +1725,11 @@ impl StoreBackend for MysqlBackend {
         );
         self.q0(&q)
             .ok()
-            .and_then(|s| s.lines().next().map(|l| l.trim().parse::<u64>().unwrap_or(0)))
+            .and_then(|s| {
+                s.lines()
+                    .next()
+                    .map(|l| l.trim().parse::<u64>().unwrap_or(0))
+            })
             .map(|n| n > 0)
             .unwrap_or(false)
     }
@@ -1670,7 +1786,11 @@ impl StoreBackend for MysqlBackend {
             "DELETE FROM capacity_samples WHERE ts < {before_ts}; SELECT ROW_COUNT();"
         ))
         .ok()
-        .and_then(|s| s.lines().next().map(|l| l.trim().parse::<usize>().unwrap_or(0)))
+        .and_then(|s| {
+            s.lines()
+                .next()
+                .map(|l| l.trim().parse::<usize>().unwrap_or(0))
+        })
         .unwrap_or(0)
     }
 
@@ -1713,7 +1833,11 @@ impl StoreBackend for MysqlBackend {
             "DELETE FROM reports WHERE ts < {before_ts}; SELECT ROW_COUNT();"
         ))
         .ok()
-        .and_then(|s| s.lines().next().map(|l| l.trim().parse::<usize>().unwrap_or(0)))
+        .and_then(|s| {
+            s.lines()
+                .next()
+                .map(|l| l.trim().parse::<usize>().unwrap_or(0))
+        })
         .unwrap_or(0)
     }
 
@@ -1855,7 +1979,9 @@ impl StoreBackend for MysqlBackend {
 
     fn instance_load_all(&self) -> Vec<(String, String)> {
         let sql = "SELECT name, data FROM instances";
-        let Ok(out) = self.q0(sql) else { return Vec::new() };
+        let Ok(out) = self.q0(sql) else {
+            return Vec::new();
+        };
         out.lines()
             .filter_map(|l| {
                 let (name, data) = l.split_once('\t')?;
@@ -1937,14 +2063,18 @@ impl StoreBackend for MysqlBackend {
     fn rbac_seed_default_admin(&self) {
         let (uname, pass) = rbac_default_creds();
         let count = self
-            .q0(&format!("SELECT COUNT(*) FROM users WHERE user='{}'", esc(&uname)))
+            .q0(&format!(
+                "SELECT COUNT(*) FROM users WHERE user='{}'",
+                esc(&uname)
+            ))
             .map(|s| s.trim().parse::<u64>().unwrap_or(0))
             .unwrap_or(0);
         if count > 0 {
             return;
         }
         let salt = crate::sha256::to_hex(&salt_bytes());
-        let hash = crate::sha256::to_hex(&crate::sha256::digest(format!("{salt}:{pass}").as_bytes()));
+        let hash =
+            crate::sha256::to_hex(&crate::sha256::digest(format!("{salt}:{pass}").as_bytes()));
         let now = now_secs();
         let q = format!(
             "INSERT INTO users(user,salt,pass_hash,enabled,created_at,updated_at) VALUES('{}','{}','{}',1,{},{})",
@@ -1981,7 +2111,8 @@ impl StoreBackend for MysqlBackend {
         let salt = it.next()?.to_string();
         let hash = it.next()?.to_string();
         let enabled = it.next()?.trim() != "0";
-        let digest = crate::sha256::to_hex(&crate::sha256::digest(format!("{salt}:{pass}").as_bytes()));
+        let digest =
+            crate::sha256::to_hex(&crate::sha256::digest(format!("{salt}:{pass}").as_bytes()));
         if digest != hash {
             return None;
         }
@@ -1995,10 +2126,13 @@ impl StoreBackend for MysqlBackend {
     }
 
     fn user_enabled(&self, user: &str) -> bool {
-        self.q0(&format!("SELECT enabled FROM users WHERE user='{}'", esc(user)))
-            .ok()
-            .and_then(|s| s.lines().next().map(|l| l.trim() != "0"))
-            .unwrap_or(false)
+        self.q0(&format!(
+            "SELECT enabled FROM users WHERE user='{}'",
+            esc(user)
+        ))
+        .ok()
+        .and_then(|s| s.lines().next().map(|l| l.trim() != "0"))
+        .unwrap_or(false)
     }
 
     fn users_list(&self) -> Vec<Value> {
@@ -2024,6 +2158,28 @@ impl StoreBackend for MysqlBackend {
         out
     }
 
+    fn users_raw(&self) -> Vec<Value> {
+        let rows: Vec<(String, String, String, bool)> = self
+            .q0("SELECT user, salt, pass_hash, enabled FROM users ORDER BY user")
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let mut it = l.split('\t');
+                let u = it.next()?.to_string();
+                let salt = it.next().unwrap_or("").to_string();
+                let hash = it.next().unwrap_or("").to_string();
+                let en = it.next().unwrap_or("1").trim() != "0";
+                Some((u, salt, hash, en))
+            })
+            .collect();
+        rows.into_iter()
+            .map(|(u, salt, hash, en)| {
+                let roles = self.roles_of(&u);
+                json!({ "user": u, "salt": salt, "pass_hash": hash, "enabled": en, "roles": roles })
+            })
+            .collect()
+    }
+
     fn user_upsert(&self, user: &str, salt: &str, pass_hash: &str, enabled: bool) {
         let now = now_secs();
         let en = if enabled { 1 } else { 0 };
@@ -2032,7 +2188,12 @@ impl StoreBackend for MysqlBackend {
              VALUES('{}','{}','{}',{},{},{}) \
              ON DUPLICATE KEY UPDATE salt=VALUES(salt), pass_hash=VALUES(pass_hash), \
              enabled=VALUES(enabled), updated_at=VALUES(updated_at)",
-            esc(user), esc(salt), pass_hash, en, now, now
+            esc(user),
+            esc(salt),
+            pass_hash,
+            en,
+            now,
+            now
         );
         let r = self.q0(&q);
         MysqlBackend::log_err("user_upsert", &r);
@@ -2042,14 +2203,19 @@ impl StoreBackend for MysqlBackend {
         let en = if enabled { 1 } else { 0 };
         let q = format!(
             "UPDATE users SET enabled={}, updated_at={} WHERE user='{}'",
-            en, now_secs(), esc(user)
+            en,
+            now_secs(),
+            esc(user)
         );
         let r = self.q0(&q);
         MysqlBackend::log_err("user_set_enabled", &r);
     }
 
     fn user_roles_set(&self, user: &str, roles: &[&str]) {
-        let _ = self.q0(&format!("DELETE FROM user_roles WHERE user='{}'", esc(user)));
+        let _ = self.q0(&format!(
+            "DELETE FROM user_roles WHERE user='{}'",
+            esc(user)
+        ));
         for role in roles {
             let q = format!(
                 "INSERT INTO user_roles(user,role) VALUES('{}','{}')",
@@ -2074,7 +2240,10 @@ impl StoreBackend for MysqlBackend {
         let mut out = Vec::new();
         for (name, desc) in rows {
             let perms: Vec<String> = self
-                .q0(&format!("SELECT perm FROM role_perms WHERE role='{}' ORDER BY perm", esc(&name)))
+                .q0(&format!(
+                    "SELECT perm FROM role_perms WHERE role='{}' ORDER BY perm",
+                    esc(&name)
+                ))
                 .unwrap_or_default()
                 .lines()
                 .map(|l| l.trim().to_string())
@@ -2089,14 +2258,19 @@ impl StoreBackend for MysqlBackend {
         let q = format!(
             "INSERT INTO roles(name,description,created_at) VALUES('{}','{}',{}) \
              ON DUPLICATE KEY UPDATE description=VALUES(description)",
-            esc(role), esc(desc), now
+            esc(role),
+            esc(desc),
+            now
         );
         let r = self.q0(&q);
         MysqlBackend::log_err("role_upsert", &r);
     }
 
     fn role_perms_set(&self, role: &str, perms: &[&str]) {
-        let _ = self.q0(&format!("DELETE FROM role_perms WHERE role='{}'", esc(role)));
+        let _ = self.q0(&format!(
+            "DELETE FROM role_perms WHERE role='{}'",
+            esc(role)
+        ));
         for perm in perms {
             let q = format!(
                 "INSERT INTO role_perms(role,perm) VALUES('{}','{}')",
@@ -2195,10 +2369,7 @@ impl StoreBackend for MysqlBackend {
             now_secs(),
             id
         );
-        self.q0(&q)
-            .ok()
-            .map(|_| true)
-            .unwrap_or(false)
+        self.q0(&q).ok().map(|_| true).unwrap_or(false)
     }
 
     fn alert_counts(&self) -> (u64, u64, u64) {
@@ -2377,7 +2548,10 @@ impl StoreBackend for MysqlBackend {
     }
 
     fn host_alloc_port(&self, name: &str) -> Option<u64> {
-        let u = format!("UPDATE rds_hosts SET next_port = next_port + 1 WHERE name='{}'", esc(name));
+        let u = format!(
+            "UPDATE rds_hosts SET next_port = next_port + 1 WHERE name='{}'",
+            esc(name)
+        );
         let r = self.q0(&u);
         MysqlBackend::log_err("host_alloc_port", &r);
         r.ok()?; // Host 不存在时 UPDATE 影响 0 行也成功,继续走 SELECT 判空
@@ -2423,7 +2597,7 @@ struct MemState {
     seq: HashMap<String, u64>,
     locks: HashMap<String, (String, u64)>, // name → (holder, lease_until)
     users: HashMap<String, (String, String, bool, Vec<String>)>, // user → (salt, pass_hash, enabled, roles)
-    roles: HashMap<String, (String, Vec<String>)>, // role → (desc, perms)
+    roles: HashMap<String, (String, Vec<String>)>,               // role → (desc, perms)
     alerts: Vec<MemAlert>,
     next_alert: u64,
     evidence: Vec<MemEvidence>,
@@ -2597,8 +2771,8 @@ impl MemoryBackend {
 
 /// evidence 行 → 视图(facts 原为 JSON 字符串,解析为对象;解析失败原样字符串兜底)
 fn mem_evidence_view(e: &MemEvidence) -> Value {
-    let facts = serde_json::from_str::<Value>(&e.facts)
-        .unwrap_or_else(|_| Value::String(e.facts.clone()));
+    let facts =
+        serde_json::from_str::<Value>(&e.facts).unwrap_or_else(|_| Value::String(e.facts.clone()));
     json!({
         "ts": e.ts,
         "instance": e.instance,
@@ -2705,7 +2879,9 @@ impl StoreBackend for MemoryBackend {
         _finished: Option<u64>,
     ) {
         let mut g = self.inner.lock().unwrap();
-        let Some(task) = g.tasks.get_mut(task_id) else { return };
+        let Some(task) = g.tasks.get_mut(task_id) else {
+            return;
+        };
         let deps: Vec<String> = serde_json::from_str(deps_json).unwrap_or_default();
         task.nodes.insert(
             node_id.to_string(),
@@ -2749,11 +2925,7 @@ impl StoreBackend for MemoryBackend {
 
     fn task_views(&self, limit: usize) -> Vec<Value> {
         let g = self.inner.lock().unwrap();
-        let mut v: Vec<Value> = g
-            .tasks
-            .iter()
-            .map(|(id, t)| mem_task_view(t, id))
-            .collect();
+        let mut v: Vec<Value> = g.tasks.iter().map(|(id, t)| mem_task_view(t, id)).collect();
         v.sort_by_key(|t| {
             (
                 std::cmp::Reverse(t["created_at"].as_u64().unwrap_or(0)),
@@ -2882,6 +3054,15 @@ impl StoreBackend for MemoryBackend {
         });
     }
 
+    fn audit_marker_exists(&self, marker: &str) -> bool {
+        let g = self.inner.lock().unwrap();
+        let prefix = format!("{marker} ");
+        g.audit
+            .iter()
+            .any(|a| a.params.starts_with(&prefix))
+    }
+
+
     fn audit_list(
         &self,
         limit: usize,
@@ -2970,10 +3151,7 @@ impl StoreBackend for MemoryBackend {
         g.evidence
             .iter()
             .rev()
-            .filter(|e| {
-                e.ts >= since_ts
-                    && kind.map_or(true, |k| k.is_empty() || e.kind == k)
-            })
+            .filter(|e| e.ts >= since_ts && kind.map_or(true, |k| k.is_empty() || e.kind == k))
             .take(limit)
             .map(mem_evidence_view)
             .collect()
@@ -3177,9 +3355,11 @@ impl StoreBackend for MemoryBackend {
 
     fn slow_gov_advise(&self, digest: &str, advice_json: &str) -> bool {
         let mut g = self.inner.lock().unwrap();
-        let Some(x) = g.slow_gov.iter_mut().find(|x| {
-            x.digest == digest && (x.status == "open" || x.status == "ack")
-        }) else {
+        let Some(x) = g
+            .slow_gov
+            .iter_mut()
+            .find(|x| x.digest == digest && (x.status == "open" || x.status == "ack"))
+        else {
             return false;
         };
         x.advice = advice_json.to_string();
@@ -3189,9 +3369,11 @@ impl StoreBackend for MemoryBackend {
 
     fn slow_gov_action(&self, id: u64, action: &str, assignee: &str) -> bool {
         let mut g = self.inner.lock().unwrap();
-        let Some(x) = g.slow_gov.iter_mut().find(|x| {
-            x.id == id && (x.status == "open" || x.status == "ack")
-        }) else {
+        let Some(x) = g
+            .slow_gov
+            .iter_mut()
+            .find(|x| x.id == id && (x.status == "open" || x.status == "ack"))
+        else {
             return false;
         };
         let now = now_secs();
@@ -3212,8 +3394,9 @@ impl StoreBackend for MemoryBackend {
         g.slow_snapshots.retain(|s| s.ts >= before_snap);
         let n1 = n1 - g.slow_snapshots.len();
         let n2 = g.slow_gov.len();
-        g.slow_gov
-            .retain(|x| !(x.status == "resolved" && x.resolved_at.map_or(false, |t| t < before_gov)));
+        g.slow_gov.retain(|x| {
+            !(x.status == "resolved" && x.resolved_at.map_or(false, |t| t < before_gov))
+        });
         let n2 = n2 - g.slow_gov.len();
         (n1, n2)
     }
@@ -3288,13 +3471,11 @@ impl StoreBackend for MemoryBackend {
         g.reports
             .iter()
             .rev()
-            .filter(|r| {
-                r.ts >= since_ts && rtype.map_or(true, |v| v.is_empty() || r.rtype == v)
-            })
+            .filter(|r| r.ts >= since_ts && rtype.map_or(true, |v| v.is_empty() || r.rtype == v))
             .take(limit)
             .map(|r| {
-                let counts = serde_json::from_str(&r.counts)
-                    .unwrap_or(Value::String(r.counts.clone()));
+                let counts =
+                    serde_json::from_str(&r.counts).unwrap_or(Value::String(r.counts.clone()));
                 json!({
                     "id": r.id, "ts": r.ts, "period": r.period, "type": r.rtype,
                     "text": r.text, "counts": counts,
@@ -3348,9 +3529,7 @@ impl StoreBackend for MemoryBackend {
         let ids: Vec<u64> = g
             .backup_outbox
             .iter()
-            .filter(|b| {
-                (b.state == "pending" || b.state == "delivering") && b.next_at <= now
-            })
+            .filter(|b| (b.state == "pending" || b.state == "delivering") && b.next_at <= now)
             .take(limit.min(200))
             .map(|b| b.id)
             .collect();
@@ -3392,8 +3571,7 @@ impl StoreBackend for MemoryBackend {
         let mut latest: std::collections::BTreeMap<(String, String), &MemBOutbox> =
             std::collections::BTreeMap::new();
         for b in g.backup_outbox.iter().filter(|b| {
-            b.state == "done"
-                && instance.map_or(true, |f| f.is_empty() || b.instance == f)
+            b.state == "done" && instance.map_or(true, |f| f.is_empty() || b.instance == f)
         }) {
             latest
                 .entry((b.instance.clone(), b.node.clone()))
@@ -3430,7 +3608,11 @@ impl StoreBackend for MemoryBackend {
 
     fn backup_outbox_requeue(&self, id: u64) -> bool {
         let mut g = self.inner.lock().unwrap();
-        let Some(b) = g.backup_outbox.iter_mut().find(|b| b.id == id && b.state == "dead") else {
+        let Some(b) = g
+            .backup_outbox
+            .iter_mut()
+            .find(|b| b.id == id && b.state == "dead")
+        else {
             return false;
         };
         b.state = "pending".into();
@@ -3490,11 +3672,13 @@ impl StoreBackend for MemoryBackend {
         let until = now + lease_secs;
         match g.locks.get(name).cloned() {
             None => {
-                g.locks.insert(name.to_string(), (holder.to_string(), until));
+                g.locks
+                    .insert(name.to_string(), (holder.to_string(), until));
                 true
             }
             Some((h, u)) if h == holder || u <= now => {
-                g.locks.insert(name.to_string(), (holder.to_string(), until));
+                g.locks
+                    .insert(name.to_string(), (holder.to_string(), until));
                 true
             }
             _ => false,
@@ -3535,11 +3719,19 @@ impl StoreBackend for MemoryBackend {
             let salt = crate::sha256::to_hex(&salt_bytes());
             g.users.insert(
                 uname.clone(),
-                (salt.clone(), hash_password(&salt, &pass), true, vec!["super".into()]),
+                (
+                    salt.clone(),
+                    hash_password(&salt, &pass),
+                    true,
+                    vec!["super".into()],
+                ),
             );
             g.roles.insert(
                 "super".into(),
-                ("超级管理员(全部权限)".into(), PERMISSIONS.iter().map(|s| s.to_string()).collect()),
+                (
+                    "超级管理员(全部权限)".into(),
+                    PERMISSIONS.iter().map(|s| s.to_string()).collect(),
+                ),
             );
         }
     }
@@ -3600,14 +3792,35 @@ impl StoreBackend for MemoryBackend {
             };
             out.push(json!({ "user": user, "enabled": *enabled, "roles": roles.clone(), "perms": perms }));
         }
+        out.sort_by(|a, b| a["user"].as_str().unwrap_or("").cmp(b["user"].as_str().unwrap_or("")));
+        out
+    }
+
+    fn users_raw(&self) -> Vec<Value> {
+        let g = self.inner.lock().unwrap();
+        let mut out: Vec<Value> = g
+            .users
+            .iter()
+            .map(|(user, (salt, hash, enabled, roles))| {
+                json!({
+                    "user": user,
+                    "salt": salt,
+                    "pass_hash": hash,
+                    "enabled": *enabled,
+                    "roles": roles.clone(),
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| a["user"].as_str().unwrap_or("").cmp(b["user"].as_str().unwrap_or("")));
         out
     }
 
     fn user_upsert(&self, user: &str, salt: &str, pass_hash: &str, enabled: bool) {
         let mut g = self.inner.lock().unwrap();
-        let e = g.users.entry(user.to_string()).or_insert_with(|| {
-            ("".into(), "".into(), true, Vec::new())
-        });
+        let e = g
+            .users
+            .entry(user.to_string())
+            .or_insert_with(|| ("".into(), "".into(), true, Vec::new()));
         e.0 = salt.to_string();
         e.1 = pass_hash.to_string();
         e.2 = enabled;
@@ -3658,10 +3871,11 @@ impl StoreBackend for MemoryBackend {
     fn alert_open(&self, instance: &str, kind: &str, severity: &str, message: &str) {
         let (exists, next_id) = {
             let g = self.inner.lock().unwrap();
-            let exists = g
-                .alerts
-                .iter()
-                .any(|a| a.instance == instance && a.kind == kind && (a.status == "open" || a.status == "ack"));
+            let exists = g.alerts.iter().any(|a| {
+                a.instance == instance
+                    && a.kind == kind
+                    && (a.status == "open" || a.status == "ack")
+            });
             (exists, g.next_alert)
         };
         if exists {
@@ -3725,7 +3939,10 @@ impl StoreBackend for MemoryBackend {
     fn alert_action(&self, id: u64, action: &str, assignee: &str) -> bool {
         let mut g = self.inner.lock().unwrap();
         let now = now_secs();
-        let Some(a) = g.alerts.iter_mut().find(|a| a.id == id && (a.status == "open" || a.status == "ack"))
+        let Some(a) = g
+            .alerts
+            .iter_mut()
+            .find(|a| a.id == id && (a.status == "open" || a.status == "ack"))
         else {
             return false;
         };
@@ -3782,7 +3999,12 @@ impl StoreBackend for MemoryBackend {
                 })
             })
             .collect();
-        list.sort_by(|a, b| b["updated_at"].as_u64().unwrap_or(0).cmp(&a["updated_at"].as_u64().unwrap_or(0)));
+        list.sort_by(|a, b| {
+            b["updated_at"]
+                .as_u64()
+                .unwrap_or(0)
+                .cmp(&a["updated_at"].as_u64().unwrap_or(0))
+        });
         list
     }
 
@@ -3807,7 +4029,12 @@ impl StoreBackend for MemoryBackend {
                 })
             })
             .collect();
-        list.sort_by(|a, b| b["updated_at"].as_u64().unwrap_or(0).cmp(&a["updated_at"].as_u64().unwrap_or(0)));
+        list.sort_by(|a, b| {
+            b["updated_at"]
+                .as_u64()
+                .unwrap_or(0)
+                .cmp(&a["updated_at"].as_u64().unwrap_or(0))
+        });
         list
     }
 
@@ -3824,7 +4051,11 @@ impl StoreBackend for MemoryBackend {
     ) {
         let mut g = self.inner.lock().unwrap();
         let now = now_secs();
-        if let Some(d) = g.dts.iter_mut().find(|d| d.instance == instance && d.node == node) {
+        if let Some(d) = g
+            .dts
+            .iter_mut()
+            .find(|d| d.instance == instance && d.node == node)
+        {
             d.engine = engine.to_string();
             d.container = container.to_string();
             d.target_label = target_label.to_string();
@@ -3985,7 +4216,9 @@ fn salt_bytes() -> [u8; 16] {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    let c = SALT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed).wrapping_mul(0x9E3779B97F4A7C15);
+    let c = SALT_COUNTER
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .wrapping_mul(0x9E3779B97F4A7C15);
     let pid = std::process::id() as u64;
     let x = t ^ c.rotate_left(13) ^ (pid << 32);
     for i in 0..16 {
@@ -4267,11 +4500,31 @@ mod tests {
         let id = format!("t-create-{}", s.next_task_seq("create"));
         s.upsert_task(&id, "create", "demo", "pending", 1, None, None);
         s.upsert_node(
-            &id, "n1", "节点一", "[]", "[{\"Noop\":{\"note\":\"x\"}}]", "pending", "", 0, 1,
-            Some(60), None, None,
+            &id,
+            "n1",
+            "节点一",
+            "[]",
+            "[{\"Noop\":{\"note\":\"x\"}}]",
+            "pending",
+            "",
+            0,
+            1,
+            Some(60),
+            None,
+            None,
         );
         s.upsert_node(
-            &id, "n2", "节点二", "[\"n1\"]", "[]", "success", "done", 1, 0, None, Some(2),
+            &id,
+            "n2",
+            "节点二",
+            "[\"n1\"]",
+            "[]",
+            "success",
+            "done",
+            1,
+            0,
+            None,
+            Some(2),
             Some(3),
         );
         let v = s.task_view(&id).expect("view");
@@ -4291,7 +4544,9 @@ mod tests {
         let s = mem();
         s.upsert_task("t1", "create", "a", "running", 1, Some(1), None);
         s.upsert_task("t2", "destroy", "a", "success", 1, Some(1), Some(2));
-        s.upsert_node("t1", "n1", "n", "[]", "[]", "running", "", 1, 0, None, None, None);
+        s.upsert_node(
+            "t1", "n1", "n", "[]", "[]", "running", "", 1, 0, None, None, None,
+        );
         let n = s.mark_interrupted();
         assert_eq!(n, 1);
         let v = s.task_view("t1").unwrap();
@@ -4348,7 +4603,14 @@ mod tests {
         let map: HashMap<String, String> = all.into_iter().collect();
         assert_eq!(map["demo2"], r#"{"name":"demo2"}"#);
         // upsert 覆盖
-        s.instance_upsert("demo", "cn-bj", "t1", r#"{"name":"demo","x":1}"#, "failed", 3);
+        s.instance_upsert(
+            "demo",
+            "cn-bj",
+            "t1",
+            r#"{"name":"demo","x":1}"#,
+            "failed",
+            3,
+        );
         assert_eq!(s.instance_load_all().len(), 2);
     }
 
@@ -4363,8 +4625,18 @@ mod tests {
         let rows0 = s.audit_since(u64::MAX, 100);
         assert_eq!(rows0.len(), 0);
         // evidence 写入/读取
-        s.evidence_insert("demo", "degrade", "从库 rds-demo-slave-1 复制中断", r#"{"slaves":[{"container":"rds-demo-slave-1","repl":"STOPPED"}]}"#);
-        s.evidence_insert("demo", "degrade", "代理不可达", r#"{"proxy":{"reachable":false}}"#);
+        s.evidence_insert(
+            "demo",
+            "degrade",
+            "从库 rds-demo-slave-1 复制中断",
+            r#"{"slaves":[{"container":"rds-demo-slave-1","repl":"STOPPED"}]}"#,
+        );
+        s.evidence_insert(
+            "demo",
+            "degrade",
+            "代理不可达",
+            r#"{"proxy":{"reachable":false}}"#,
+        );
         s.evidence_insert("other", "degrade", "容器缺失", r#"{}"#);
         let latest = s.evidence_latest("demo", 10);
         assert_eq!(latest.len(), 2);
@@ -4434,14 +4706,30 @@ mod query_audit_tests {
     fn memory_query_audit_roundtrip() {
         let s = mem();
         s.query_audit_insert(
-            "dba1", "demo", "master",
+            "dba1",
+            "demo",
+            "master",
             "SELECT * FROM appdb.users WHERE id=1",
-            "hash1", true, 2, false, 5, true, "",
+            "hash1",
+            true,
+            2,
+            false,
+            5,
+            true,
+            "",
         );
         s.query_audit_insert(
-            "dba1", "demo", "master",
-            "UPDATE appdb.users SET a=1", "hash2", false,
-            0, false, 3, false, "ERROR 1142 (42000): SELECT command denied",
+            "dba1",
+            "demo",
+            "master",
+            "UPDATE appdb.users SET a=1",
+            "hash2",
+            false,
+            0,
+            false,
+            3,
+            false,
+            "ERROR 1142 (42000): SELECT command denied",
         );
         // 新→旧;完整 SQL 原文可回溯
         let all = s.query_audit_list(10, None, None, None);
@@ -4520,7 +4808,10 @@ mod slow_tests {
     fn memory_slow_gov_lifecycle_and_prune() {
         let s = mem();
         assert!(s.slow_gov_ensure("d1", "select a=?"));
-        assert!(!s.slow_gov_ensure("d1", "select a=?"), "同 digest open 不重复");
+        assert!(
+            !s.slow_gov_ensure("d1", "select a=?"),
+            "同 digest open 不重复"
+        );
         assert!(s.slow_gov_ensure("d2", "update t=?"));
         assert_eq!(s.slow_gov_list(10, None).len(), 2);
         let list = s.slow_gov_list(10, Some("open"));
@@ -4553,13 +4844,27 @@ mod backup_outbox_tests {
     fn memory_backend_module_crud() {
         let s = mem();
         assert!(s.module_list().is_empty());
-        s.module_upsert("清日志", "清理", "删除容器内旧日志", r#"[{"Noop":{"note":"ok"}}]"#, "admin", 1);
+        s.module_upsert(
+            "清日志",
+            "清理",
+            "删除容器内旧日志",
+            r#"[{"Noop":{"note":"ok"}}]"#,
+            "admin",
+            1,
+        );
         let list = s.module_list();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0]["name"], "清日志");
         assert_eq!(list[0]["steps_json"], r#"[{"Noop":{"note":"ok"}}]"#);
         // 同名覆盖=新版本
-        s.module_upsert("清日志", "维护", "v2", r#"[{"Noop":{"note":"v2"}}]"#, "admin", 2);
+        s.module_upsert(
+            "清日志",
+            "维护",
+            "v2",
+            r#"[{"Noop":{"note":"v2"}}]"#,
+            "admin",
+            2,
+        );
         let list2 = s.module_list();
         assert_eq!(list2.len(), 1);
         assert_eq!(list2[0]["desc"], "v2");
@@ -4571,10 +4876,17 @@ mod backup_outbox_tests {
     }
 
     #[test]
-    fn memory_outbox_dedupe_poll_mark() {        let s = mem();
+    fn memory_outbox_dedupe_poll_mark() {
+        let s = mem();
         assert!(s.backup_outbox_enqueue("register_instance", "demo", "master", "k1", r#"{"a":1}"#));
         // 同 key 幂等拒绝
-        assert!(!s.backup_outbox_enqueue("register_instance", "demo", "master", "k1", r#"{"a":1}"#));
+        assert!(!s.backup_outbox_enqueue(
+            "register_instance",
+            "demo",
+            "master",
+            "k1",
+            r#"{"a":1}"#
+        ));
         assert!(s.backup_outbox_enqueue("heartbeat", "demo", "", "k2", "{}"));
         let polled = s.backup_outbox_poll(10, now_secs() + 5);
         assert_eq!(polled.len(), 2);
@@ -4603,7 +4915,12 @@ mod backup_outbox_tests {
         assert!(s.backup_outbox_requeue(polled[0]["id"].as_u64().unwrap()));
         assert!(!s.backup_outbox_requeue(9999));
         let st2 = s.backup_outbox_reg_state(None);
-        assert_eq!(st2.iter().filter(|x| x["reg_state"] == "registered").count(), 1);
+        assert_eq!(
+            st2.iter()
+                .filter(|x| x["reg_state"] == "registered")
+                .count(),
+            1
+        );
         // 清理 done/dead 早于 before
         assert_eq!(s.backup_outbox_prune(now_secs() + 1), 1); // dead 该删;done 的 updated_at 为 now,未删
     }
@@ -4621,14 +4938,35 @@ mod capacity_report_tests {
     fn memory_capacity_roundtrip_since_prune() {
         let s = mem();
         s.capacity_insert(&[
-            CapSample { instance: "demo".into(), node: "master".into(), disk_used_bytes: 10, disk_total_bytes: 100, data_gib: 5.0 },
-            CapSample { instance: "demo".into(), node: "master".into(), disk_used_bytes: 20, disk_total_bytes: 100, data_gib: 6.0 },
+            CapSample {
+                instance: "demo".into(),
+                node: "master".into(),
+                disk_used_bytes: 10,
+                disk_total_bytes: 100,
+                data_gib: 5.0,
+            },
+            CapSample {
+                instance: "demo".into(),
+                node: "master".into(),
+                disk_used_bytes: 20,
+                disk_total_bytes: 100,
+                data_gib: 6.0,
+            },
         ]);
-        s.capacity_insert(&[CapSample { instance: "other".into(), node: "master".into(), disk_used_bytes: 1, disk_total_bytes: 10, data_gib: 1.0 }]);
+        s.capacity_insert(&[CapSample {
+            instance: "other".into(),
+            node: "master".into(),
+            disk_used_bytes: 1,
+            disk_total_bytes: 10,
+            data_gib: 1.0,
+        }]);
         let rows = s.capacity_since(Some("demo"), 0, 100);
         assert_eq!(rows.len(), 2);
         // 升序 + 字段完整
-        assert_eq!(rows[0]["ts"].as_u64().unwrap(), rows[1]["ts"].as_u64().unwrap()); // 同批同 ts
+        assert_eq!(
+            rows[0]["ts"].as_u64().unwrap(),
+            rows[1]["ts"].as_u64().unwrap()
+        ); // 同批同 ts
         assert_eq!(rows[0]["disk_used_bytes"], 10);
         assert_eq!(rows[1]["data_gib"], 6.0);
         assert_eq!(s.capacity_since(None, 0, 100).len(), 3);
@@ -4659,17 +4997,28 @@ mod capacity_report_tests {
         assert!(s.slow_gov_ensure("d1", "select a=?"));
         assert!(s.slow_gov_ensure("d2", "update t=?"));
         // 命中 open 行写建议;advice 随列表返回
-        assert!(s.slow_gov_advise("d1", r#"{"rising_pct":null,"reasons":["avg"],"suggestions":[]}"#));
+        assert!(s.slow_gov_advise(
+            "d1",
+            r#"{"rising_pct":null,"reasons":["avg"],"suggestions":[]}"#
+        ));
         let list = s.slow_gov_list(10, None);
         let d1 = list.iter().find(|x| x["digest"] == "d1").unwrap();
         assert_eq!(d1["advice"]["reasons"][0], "avg");
         // 未知 digest / 已 closed 不命中
         assert!(!s.slow_gov_advise("nope", "{}"));
-        let id = list.iter().find(|x| x["digest"] == "d2").unwrap()["id"].as_u64().unwrap();
+        let id = list.iter().find(|x| x["digest"] == "d2").unwrap()["id"]
+            .as_u64()
+            .unwrap();
         assert!(s.slow_gov_action(id, "resolve", "dba1"));
         assert!(!s.slow_gov_advise("d2", "{}"), "resolved 行不更新建议");
         // 空建议行视图为 null
-        assert_eq!(s.slow_gov_list(10, None).iter().find(|x| x["digest"] == "d2").unwrap()["advice"], Value::Null);
+        assert_eq!(
+            s.slow_gov_list(10, None)
+                .iter()
+                .find(|x| x["digest"] == "d2")
+                .unwrap()["advice"],
+            Value::Null
+        );
     }
 
     #[test]
@@ -4677,8 +5026,30 @@ mod capacity_report_tests {
         // Host 注册表:登记/更新/列表/删除 + 按 Host 端口高水位分配递增
         let s = mem();
         assert!(s.host_list().is_empty());
-        s.host_upsert("host-cn-north-01", "10.0.0.1", "cn-bj", "az1", "rack-a1", 32, 64, 2000, 9191, "running");
-        s.host_upsert("host-cn-north-02", "10.0.0.2", "cn-bj", "az1", "rack-a2", 16, 32, 1000, 0, "running");
+        s.host_upsert(
+            "host-cn-north-01",
+            "10.0.0.1",
+            "cn-bj",
+            "az1",
+            "rack-a1",
+            32,
+            64,
+            2000,
+            9191,
+            "running",
+        );
+        s.host_upsert(
+            "host-cn-north-02",
+            "10.0.0.2",
+            "cn-bj",
+            "az1",
+            "rack-a2",
+            16,
+            32,
+            1000,
+            0,
+            "running",
+        );
         let all = s.host_list();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0]["name"], "host-cn-north-01"); // 按 name 排序
@@ -4686,14 +5057,31 @@ mod capacity_report_tests {
         assert_eq!(all[0]["agent_port"], 9191); // agent 端口随清单返回
         assert_eq!(all[0]["next_port"], 35_000);
         // 更新不改端口高水位
-        s.host_upsert("host-cn-north-01", "10.0.0.1", "cn-bj", "az1", "rack-a1", 64, 128, 4000, 9191, "maintenance");
-        assert_eq!(s.host_list().iter().find(|h| h["name"] == "host-cn-north-01").unwrap()["cpu_cores"], 64);
+        s.host_upsert(
+            "host-cn-north-01",
+            "10.0.0.1",
+            "cn-bj",
+            "az1",
+            "rack-a1",
+            64,
+            128,
+            4000,
+            9191,
+            "maintenance",
+        );
+        assert_eq!(
+            s.host_list()
+                .iter()
+                .find(|h| h["name"] == "host-cn-north-01")
+                .unwrap()["cpu_cores"],
+            64
+        );
         // 按 Host 分配端口:连续自增,互不干扰
         assert_eq!(s.host_alloc_port("host-cn-north-01"), Some(35_001));
         assert_eq!(s.host_alloc_port("host-cn-north-01"), Some(35_002));
         assert_eq!(s.host_alloc_port("host-cn-north-02"), Some(35_001)); // 每 Host 独立高水位
         assert_eq!(s.host_alloc_port("ghost"), None); // 未登记 Host
-        // 删除
+                                                      // 删除
         assert!(s.host_delete("host-cn-north-02"));
         assert!(!s.host_delete("host-cn-north-02"));
         assert_eq!(s.host_list().len(), 1);

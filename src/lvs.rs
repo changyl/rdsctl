@@ -10,8 +10,8 @@
 // 生命周期由 DAG Step 驱动(创建 EnsureLvs / 销毁 StopLvs),sweeper 兜底恢复
 // (进程重启后按持久化实例重建),实例记录字段(lvs/lvs_container/lvs_mysql_port)不变。
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 use dashmap::DashMap;
 use tokio::io::AsyncWriteExt;
@@ -86,13 +86,16 @@ pub fn ensure(inst: &RdsInstance) -> Result<(), String> {
     std_listener
         .set_nonblocking(true)
         .map_err(|e| format!("接入层设置非阻塞失败: {e}"))?;
-    let listener = TcpListener::from_std(std_listener)
-        .map_err(|e| format!("接入层接入运行时失败: {e}"))?;
+    let listener =
+        TcpListener::from_std(std_listener).map_err(|e| format!("接入层接入运行时失败: {e}"))?;
     let backends_c = backends.clone();
     let name = inst.name.clone();
     let task = rt.spawn(async move {
         let bcs = backends_c.clone();
-        tracing::info!("LVS 接入层就绪: {name} → 127.0.0.1:{port} (后端 {} 个 Proxy)", bcs.len());
+        tracing::info!(
+            "LVS 接入层就绪: {name} → 127.0.0.1:{port} (后端 {} 个 Proxy)",
+            bcs.len()
+        );
         loop {
             let (mut client, _) = match listener.accept().await {
                 Ok(c) => c,
@@ -124,7 +127,13 @@ pub fn ensure(inst: &RdsInstance) -> Result<(), String> {
             });
         }
     });
-    registry().insert(inst.name.clone(), Gate { task, backend_idx: AtomicUsize::new(0) });
+    registry().insert(
+        inst.name.clone(),
+        Gate {
+            task,
+            backend_idx: AtomicUsize::new(0),
+        },
+    );
     Ok(())
 }
 

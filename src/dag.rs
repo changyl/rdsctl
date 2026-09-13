@@ -142,6 +142,13 @@ pub enum Step {
         master: String,
         new_slave: String,
     },
+    /// xenon(raft) 集群创建收尾校验(对齐 xenon deploy/xenon.sh wait_cluster_ready):
+    /// 轮询各节点 `xenoncli raft status` 直到出现 LEADER → 主上写 init 数据 →
+    /// 等待 raft 复制在全节点读回一致(细节见 instance::verify_xenon)。
+    /// members = 全部 xenon 节点容器名(顺序即节点序,可判定种子节点)。
+    VerifyXenon {
+        members: Vec<String>,
+    },
     /// 启动实例接入转发器(LVS 接入层,进程内实现:VIP → 各 Proxy 宿主端口;镜像无关)
     EnsureLvs {
         instance: String,
@@ -200,8 +207,34 @@ pub enum Step {
 }
 
 /// 步骤执行器:Step → 输出日志(实例/容器编排层实现)
+/// 步骤执行上下文:步骤账本(有效一次)与审计定位所需(设计 §8.4)
+///
+/// 为什么必须显式传:幂等键 = (task_id, node_id, step_idx, idem_key);
+/// 只靠步骤内容无法区分"同一步骤在重试"与"两个不同步骤恰好内容相同"。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepCtx {
+    pub task_id: String,
+    /// 任务归属实例:执行面需要它来取**共识租约 fence**(设计 §9.2)
+    pub instance: String,
+    pub node_id: String,
+    pub step_idx: usize,
+}
+
+impl StepCtx {
+    pub fn new(task_id: &str, instance: &str, node_id: &str, step_idx: usize) -> Self {
+        Self {
+            task_id: task_id.to_string(),
+            instance: instance.to_string(),
+            node_id: node_id.to_string(),
+            step_idx,
+        }
+    }
+}
+
 pub type StepExecutor = Arc<
-    dyn Fn(&Step) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> + Send + Sync,
+    dyn Fn(&StepCtx, &Step) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
+        + Send
+        + Sync,
 >;
 
 /// 任务节点定义(数据化,可持久化)
@@ -318,21 +351,39 @@ fn classify_node_module(id: &str, name: &str, defs: &HashMap<String, TaskNode>) 
                 Step::NetworkCreate { .. } | Step::NetworkRm { .. } => return "net".into(),
                 Step::DockerRun { container, .. } => {
                     let c = container.to_lowercase();
-                    if c.contains("master") { return "master".into(); }
-                    if c.contains("slave") { return "slave".into(); }
-                    if c.contains("proxy") { return "proxy".into(); }
+                    if c.contains("master") {
+                        return "master".into();
+                    }
+                    if c.contains("slave") {
+                        return "slave".into();
+                    }
+                    if c.contains("proxy") {
+                        return "proxy".into();
+                    }
                 }
                 Step::DockerExec { container, args } => {
                     let c = container.to_lowercase();
-                    if args.iter().any(|a| a.contains("mysqldump")) { return "backup".into(); }
-                    if c.contains("master") { return "master".into(); }
-                    if c.contains("slave") { return "slave".into(); }
-                    if c.contains("proxy") { return "proxy".into(); }
+                    if args.iter().any(|a| a.contains("mysqldump")) {
+                        return "backup".into();
+                    }
+                    if c.contains("master") {
+                        return "master".into();
+                    }
+                    if c.contains("slave") {
+                        return "slave".into();
+                    }
+                    if c.contains("proxy") {
+                        return "proxy".into();
+                    }
                 }
                 Step::ExecSql { sql, .. } => {
-                    if sql.contains("START REPLICA") { return "repl".into(); }
+                    if sql.contains("START REPLICA") {
+                        return "repl".into();
+                    }
                 }
-                Step::VerifyReplication { .. } | Step::VerifyScaleout { .. } => return "verify".into(),
+                Step::VerifyReplication { .. } | Step::VerifyScaleout { .. } => {
+                    return "verify".into()
+                }
                 Step::Audit { .. } => return "cleanup".into(),
                 _ => {}
             }
@@ -375,7 +426,11 @@ impl TaskScheduler {
     /// 手动重试单个步骤:仅限「整任务已失败/跳过」的节点,且其直接上游须成功。
     /// 语义=重跑该节点一次(不改动下游);若重试后全部节点 ∈ {成功,跳过} 则任务转成功。
     /// 任务不在内存(重启/历史任务)时,先从持久化层水合出完整定义再执行。
-    pub async fn rerun_node(self: &Arc<Self>, task_id: &str, node_id: &str) -> Result<String, String> {
+    pub async fn rerun_node(
+        self: &Arc<Self>,
+        task_id: &str,
+        node_id: &str,
+    ) -> Result<String, String> {
         let mut task = self.tasks.get(task_id).map(|t| t.clone());
         if task.is_none() && self.store.is_some() {
             // 历史任务(进程重启后仅剩 DB 记录):水合定义与终态结果,再走同一重试路径
@@ -402,14 +457,24 @@ impl TaskScheduler {
             nd
         };
         let Some(node) = node else {
-            return Err(format!("节点 {node_id} 定义缺失,无法手动重试(节点步骤未持久化)"));
+            return Err(format!(
+                "节点 {node_id} 定义缺失,无法手动重试(节点步骤未持久化)"
+            ));
         };
-        let cur = task.results.get(node_id).map(|r| r.status).unwrap_or(TaskStatus::Pending);
+        let cur = task
+            .results
+            .get(node_id)
+            .map(|r| r.status)
+            .unwrap_or(TaskStatus::Pending);
         if !matches!(cur, TaskStatus::Failed | TaskStatus::Skipped) {
             return Err(format!("节点 {node_id} 当前状态无需重试"));
         }
         for d in &node.deps {
-            let st = task.results.get(d).map(|r| r.status).unwrap_or(TaskStatus::Pending);
+            let st = task
+                .results
+                .get(d)
+                .map(|r| r.status)
+                .unwrap_or(TaskStatus::Pending);
             if st != TaskStatus::Success {
                 return Err(format!("上游节点 {d} 未成功,请先重试上游"));
             }
@@ -421,26 +486,58 @@ impl TaskScheduler {
         }
         if let Some(st) = &self.store {
             let started = task.meta.lock().started_at;
-            st.upsert_task(&task.id, &task.kind, &task.instance, "running", task.created_at, started, None);
+            st.upsert_task(
+                &task.id,
+                &task.kind,
+                &task.instance,
+                "running",
+                task.created_at,
+                started,
+                None,
+            );
         }
-        let (id, out, attempts) = run_node(node.clone(), self.executor.clone()).await;
+        let (id, out, attempts) = run_node(
+            &task.id,
+            &task.instance,
+            node.clone(),
+            self.executor.clone(),
+        )
+        .await;
         let ok = out.is_ok();
-        let status = if ok { TaskStatus::Success } else { TaskStatus::Failed };
+        let status = if ok {
+            TaskStatus::Success
+        } else {
+            TaskStatus::Failed
+        };
         let now = now_secs();
-        let r = NodeResult { status, output: out.unwrap_or_else(|e| e), attempts, started_at: now, finished_at: now };
+        let r = NodeResult {
+            status,
+            output: out.unwrap_or_else(|e| e),
+            attempts,
+            started_at: now,
+            finished_at: now,
+        };
         task.results.insert(id, r.clone());
         persist_node(&self.store, &task, &node, &r);
         // 汇总终态:全部 ∈ {成功,跳过} → 成功;否则仍失败
         let mut fin = TaskStatus::Success;
         let keys: Vec<String> = task.defs.keys().cloned().collect();
         for k in keys {
-            let st = task.results.get(&k).map(|x| x.status).unwrap_or(TaskStatus::Pending);
+            let st = task
+                .results
+                .get(&k)
+                .map(|x| x.status)
+                .unwrap_or(TaskStatus::Pending);
             if !matches!(st, TaskStatus::Success | TaskStatus::Skipped) {
                 fin = TaskStatus::Failed;
                 break;
             }
         }
-        let finished = if fin == TaskStatus::Success { Some(now_secs()) } else { None };
+        let finished = if fin == TaskStatus::Success {
+            Some(now_secs())
+        } else {
+            None
+        };
         {
             let mut m = task.meta.lock();
             m.status = fin;
@@ -458,7 +555,13 @@ impl TaskScheduler {
 
     /// 提交 DAG 任务(数据化节点),返回 task_id。
     /// 接收 &Arc<Self>:spawn 需要 Arc 句柄,同时避免经 crate::manager() 自引用。
-    pub fn submit(self: &Arc<Self>, kind: &str, instance: &str, creator: &str, nodes: Vec<TaskNode>) -> String {
+    pub fn submit(
+        self: &Arc<Self>,
+        kind: &str,
+        instance: &str,
+        creator: &str,
+        nodes: Vec<TaskNode>,
+    ) -> String {
         // id 序号:有 DB 时用持久化自增序列(重启安全、不重复);
         // 无 DB(单元测试)退回进程内计数器。
         let seq = match &self.store {
@@ -466,8 +569,10 @@ impl TaskScheduler {
             None => self.next_id.fetch_add(1, Ordering::Relaxed),
         };
         let id = format!("t-{}-{}", kind, seq);
-        let nodes_map: HashMap<String, String> =
-            nodes.iter().map(|n| (n.id.clone(), n.name.clone())).collect();
+        let nodes_map: HashMap<String, String> = nodes
+            .iter()
+            .map(|n| (n.id.clone(), n.name.clone()))
+            .collect();
         let defs_map: HashMap<String, TaskNode> =
             nodes.iter().map(|n| (n.id.clone(), n.clone())).collect();
         let deps_map: HashMap<String, Vec<String>> = nodes
@@ -537,17 +642,28 @@ impl TaskScheduler {
     }
 
     /// 用户自定义草稿:仅建 pending 任务不执行(Phase B 可编辑/启动)
-    pub fn submit_draft(self: &Arc<Self>, instance: &str, creator: &str, nodes: Vec<TaskNode>) -> Result<String, String> {
-        if nodes.is_empty() { return Err("草稿至少包含一个节点".to_string()); }
+    pub fn submit_draft(
+        self: &Arc<Self>,
+        instance: &str,
+        creator: &str,
+        nodes: Vec<TaskNode>,
+    ) -> Result<String, String> {
+        if nodes.is_empty() {
+            return Err("草稿至少包含一个节点".to_string());
+        }
         let seq = match &self.store {
             Some(st) => st.next_task_seq("user"),
             None => self.next_id.fetch_add(1, Ordering::Relaxed),
         };
         let id = format!("t-user-{seq}");
-        let nodes_map: HashMap<String, String> =
-            nodes.iter().map(|n| (n.id.clone(), n.name.clone())).collect();
-        let deps_map: HashMap<String, Vec<String>> =
-            nodes.iter().map(|n| (n.id.clone(), n.deps.clone())).collect();
+        let nodes_map: HashMap<String, String> = nodes
+            .iter()
+            .map(|n| (n.id.clone(), n.name.clone()))
+            .collect();
+        let deps_map: HashMap<String, Vec<String>> = nodes
+            .iter()
+            .map(|n| (n.id.clone(), n.deps.clone()))
+            .collect();
         let defs_map: HashMap<String, TaskNode> =
             nodes.iter().map(|n| (n.id.clone(), n.clone())).collect();
         let task = Arc::new(DagTask {
@@ -573,13 +689,19 @@ impl TaskScheduler {
         let Some(task) = self.tasks.get(task_id).map(|t| t.clone()) else {
             return Err(format!("任务 {task_id} 不存在"));
         };
-        if task.kind != "user" { return Err("仅用户自定义草稿可手动启动".to_string()); }
+        if task.kind != "user" {
+            return Err("仅用户自定义草稿可手动启动".to_string());
+        }
         {
             let m = task.meta.lock();
-            if m.status != TaskStatus::Pending { return Err("仅待启动(pending)的草稿可启动".to_string()); }
+            if m.status != TaskStatus::Pending {
+                return Err("仅待启动(pending)的草稿可启动".to_string());
+            }
         }
         let nodes = task.defs_order.lock().clone();
-        if nodes.is_empty() { return Err("草稿无节点,无法启动".to_string()); }
+        if nodes.is_empty() {
+            return Err("草稿无节点,无法启动".to_string());
+        }
         self.canceled.remove(task_id);
         self.running.fetch_add(1, Ordering::Relaxed);
         let sched = Arc::clone(self);
@@ -597,16 +719,26 @@ impl TaskScheduler {
         let Some(orig) = self.tasks.get(task_id).map(|t| t.clone()) else {
             return Err(format!("任务 {task_id} 不存在"));
         };
-        if orig.kind != "user" { return Err("仅用户自定义草稿可编辑".to_string()); }
+        if orig.kind != "user" {
+            return Err("仅用户自定义草稿可编辑".to_string());
+        }
         {
             let m = orig.meta.lock();
-            if m.status != TaskStatus::Pending { return Err("仅待启动(pending)的草稿可编辑".to_string()); }
+            if m.status != TaskStatus::Pending {
+                return Err("仅待启动(pending)的草稿可编辑".to_string());
+            }
         }
-        if nodes.is_empty() { return Err("草稿至少包含一个节点".to_string()); }
-        let nodes_map: HashMap<String, String> =
-            nodes.iter().map(|n| (n.id.clone(), n.name.clone())).collect();
-        let deps_map: HashMap<String, Vec<String>> =
-            nodes.iter().map(|n| (n.id.clone(), n.deps.clone())).collect();
+        if nodes.is_empty() {
+            return Err("草稿至少包含一个节点".to_string());
+        }
+        let nodes_map: HashMap<String, String> = nodes
+            .iter()
+            .map(|n| (n.id.clone(), n.name.clone()))
+            .collect();
+        let deps_map: HashMap<String, Vec<String>> = nodes
+            .iter()
+            .map(|n| (n.id.clone(), n.deps.clone()))
+            .collect();
         let defs_map: HashMap<String, TaskNode> =
             nodes.iter().map(|n| (n.id.clone(), n.clone())).collect();
         let task = Arc::new(DagTask {
@@ -631,7 +763,10 @@ impl TaskScheduler {
     pub fn delete_task(&self, task_id: &str) -> Result<(), String> {
         let live_term = self.tasks.get(task_id).map(|t| {
             let m = t.meta.lock();
-            matches!(m.status, TaskStatus::Success | TaskStatus::Failed | TaskStatus::Skipped)
+            matches!(
+                m.status,
+                TaskStatus::Success | TaskStatus::Failed | TaskStatus::Skipped
+            )
         });
         match live_term {
             Some(true) => {
@@ -744,7 +879,8 @@ impl TaskScheduler {
             return;
         }
 
-        let node_by_id: HashMap<String, &TaskNode> = nodes.iter().map(|n| (n.id.clone(), n)).collect();
+        let node_by_id: HashMap<String, &TaskNode> =
+            nodes.iter().map(|n| (n.id.clone(), n)).collect();
         let mut ready: Vec<&TaskNode> = nodes
             .iter()
             .filter(|n| deps_left.get(&n.id).copied().unwrap_or(0) == 0)
@@ -767,11 +903,13 @@ impl TaskScheduler {
                 let node = (*n).clone();
                 let executor = executor.clone();
                 let cancel_flag = self.is_canceled(&task.id);
+                let task_id = task.id.clone();
+                let task_instance = task.instance.clone();
                 joins.spawn(async move {
                     if cancel_flag {
                         return (node.id.clone(), Err("任务已取消".to_string()), 0u32);
                     }
-                    run_node(node, executor).await
+                    run_node(&task_id, &task_instance, node, executor).await
                 });
             }
             ready.clear();
@@ -863,8 +1001,22 @@ impl TaskScheduler {
     // 已完成节点保留其原结果与输出(不重跑),仅 pending/running 节点重新执行。
     // 前提:节点步骤幂等(见 docs/scaling-design.md §7)。
 
+    /// 续跑/接管未完成任务扫描。
+    ///
+    /// 两条硬约束(集群模式下缺一不可,否则会重复执行副作用):
+    ///   ① **只有 shard leader 可以续跑**:否则每个副本都会把同一批未完成任务各跑一遍
+    ///      (实测:3 副本模式下会同时出现 3 次 `续跑 1 个未完成任务`,导致同一容器被
+    ///       重复 RUN/RM、LVS 端口互相顶掉,任务永不收敛);
+    ///   ② **本进程已在跑的任务跳过**:使该扫描可被 leader 定期调用(leader 变更后接管)。
+    /// M1b 的持久队列 + claim 落地后,这两条会被队列语义取代(设计 §7.1)。
     pub fn resume_pending(self: &Arc<Self>) -> usize {
         let Some(st) = &self.store else { return 0 };
+        if let Some(rt) = crate::ha::runtime::global() {
+            if !rt.is_leader() {
+                tracing::debug!("非 leader:跳过未完成任务续跑扫描(由 leader 串行化)");
+                return 0;
+            }
+        }
         let defs = st.pending_task_definitions();
         if defs.is_empty() {
             return 0;
@@ -872,12 +1024,31 @@ impl TaskScheduler {
         let mut n = 0;
         for raw in defs {
             if let Ok(def) = serde_json::from_value::<PersistedTaskDef>(raw) {
+                // ② 本进程已在执行且未终态 → 跳过(避免重复执行)
+                if let Some(t) = self.tasks.get(&def.id) {
+                    let status = t.meta.lock().status;
+                    if !matches!(status, TaskStatus::Success | TaskStatus::Failed) {
+                        continue;
+                    }
+                }
                 self.resume_one(def);
                 n += 1;
             }
         }
-        tracing::info!("启动恢复:续跑 {n} 个未完成任务");
+        if n > 0 {
+            tracing::info!("续跑/接管 {n} 个未完成任务(leader={})", self.is_leader_hint());
+        } else {
+            tracing::debug!("续跑扫描:无可接管任务");
+        }
         n
+    }
+
+    fn is_leader_hint(&self) -> String {
+        match crate::ha::runtime::global() {
+            Some(rt) if rt.is_leader() => "self".to_string(),
+            Some(_) => "other".to_string(),
+            None => "single".to_string(),
+        }
     }
 
     /// 从持久化层水合任意状态的任务(历史/重启后的任务,内存无 defs):
@@ -901,10 +1072,16 @@ impl TaskScheduler {
                 },
             );
         }
-        let names: HashMap<String, String> =
-            def.nodes.iter().map(|n| (n.node_id.clone(), n.name.clone())).collect();
-        let deps_full: HashMap<String, Vec<String>> =
-            def.nodes.iter().map(|n| (n.node_id.clone(), n.deps.clone())).collect();
+        let names: HashMap<String, String> = def
+            .nodes
+            .iter()
+            .map(|n| (n.node_id.clone(), n.name.clone()))
+            .collect();
+        let deps_full: HashMap<String, Vec<String>> = def
+            .nodes
+            .iter()
+            .map(|n| (n.node_id.clone(), n.deps.clone()))
+            .collect();
         let defs: HashMap<String, TaskNode> = def
             .nodes
             .iter()
@@ -1095,6 +1272,8 @@ fn task_status_from(s: &str) -> TaskStatus {
 
 /// 执行单个节点:按重试次数执行步骤序列;单步带超时
 async fn run_node(
+    task_id: &str,
+    instance: &str,
     node: TaskNode,
     executor: StepExecutor,
 ) -> (String, Result<String, String>, u32) {
@@ -1103,18 +1282,16 @@ async fn run_node(
         attempts += 1;
         let mut logs = Vec::new();
         let mut node_err: Option<String> = None;
-        for step in &node.steps {
-            let fut = executor(step);
+        for (step_idx, step) in node.steps.iter().enumerate() {
+            let ctx = StepCtx::new(task_id, instance, &node.id, step_idx);
+            let fut = executor(&ctx, step);
             let out = match node.timeout_secs {
-                Some(secs) => match tokio::time::timeout(
-                    std::time::Duration::from_secs(secs),
-                    fut,
-                )
-                .await
-                {
-                    Ok(r) => r,
-                    Err(_) => Err(format!("步骤超时(>{secs}s)")),
-                },
+                Some(secs) => {
+                    match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
+                        Ok(r) => r,
+                        Err(_) => Err(format!("步骤超时(>{secs}s)")),
+                    }
+                }
                 None => fut.await,
             };
             match out {
@@ -1276,7 +1453,7 @@ mod tests {
     }
 
     fn make_sched() -> Arc<TaskScheduler> {
-        let exec: StepExecutor = Arc::new(|step: &Step| {
+        let exec: StepExecutor = Arc::new(|_ctx: &StepCtx, step: &Step| {
             let note = match step {
                 Step::Noop { note } => note.clone(),
                 _ => "?".into(),
@@ -1320,7 +1497,7 @@ mod tests {
 
     #[tokio::test]
     async fn failure_skips_dependents() {
-        let exec: StepExecutor = Arc::new(|step: &Step| {
+        let exec: StepExecutor = Arc::new(|_ctx: &StepCtx, step: &Step| {
             let note = match step {
                 Step::Noop { note } => note.clone(),
                 _ => "?".into(),
@@ -1370,8 +1547,14 @@ mod tests {
     fn module_classify_backup_and_offline_slave() {
         // 备份节点 → backup;离线从(名字含“备份”)必须先归从库
         let defs = HashMap::new();
-        assert_eq!(classify_node_module("backup", "执行逻辑备份(mysqldump)", &defs), "backup");
-        assert_eq!(classify_node_module("slave2", "启动从节点(统计/备份)", &defs), "slave");
+        assert_eq!(
+            classify_node_module("backup", "执行逻辑备份(mysqldump)", &defs),
+            "backup"
+        );
+        assert_eq!(
+            classify_node_module("slave2", "启动从节点(统计/备份)", &defs),
+            "slave"
+        );
         assert_eq!(classify_node_module("x", "移除网络", &defs), "net");
         // 步骤级判定:DockerExec 中出现 mysqldump → backup
         let mut d2 = HashMap::new();
@@ -1397,7 +1580,7 @@ mod tests {
         let tries = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let exec: StepExecutor = {
             let tries = tries.clone();
-            Arc::new(move |step: &Step| {
+            Arc::new(move |_ctx: &StepCtx, step: &Step| {
                 let t = tries.clone();
                 let note = match step {
                     Step::Noop { note } => note.clone(),
@@ -1430,7 +1613,10 @@ mod tests {
     #[tokio::test]
     async fn cancel_stops_task() {
         let sched = make_sched();
-        let nodes = vec![node("a", &[], vec![step_ok("a")]), node("b", &["a"], vec![step_ok("b")])];
+        let nodes = vec![
+            node("a", &[], vec![step_ok("a")]),
+            node("b", &["a"], vec![step_ok("b")]),
+        ];
         let tid = sched.submit("test", "i", "t", nodes);
         sched.cancel(&tid);
         let st = wait_terminal(&sched, &tid).await;
@@ -1443,13 +1629,76 @@ mod tests {
         use crate::store::{MemoryBackend, Store};
         let store = Arc::new(Store::from_backend(MemoryBackend::new()));
         // 模拟 create 失败现场:net/master 成功、proxy 失败、verify 被跳过;整任务 failed 已落库
-        store.upsert_task("t-create-1", "create", "demo", "failed", 100, Some(100), Some(120));
-        store.upsert_node("t-create-1", "net", "创建网络", "[]", "[]", "success", "ok", 1, 1, Some(30), Some(100), Some(105));
-        store.upsert_node("t-create-1", "master", "启动主节点", "[\"net\"]", "[]", "success", "ok", 1, 1, Some(60), Some(105), Some(115));
-        let steps = serde_json::to_string(&vec![Step::Noop { note: "p-ok".into() }]).unwrap();
-        store.upsert_node("t-create-1", "proxy", "启动 newproxy 代理", "[\"master\"]", &steps, "failed", "docker 失败", 3, 1, Some(120), Some(116), Some(120));
-        store.upsert_node("t-create-1", "verify", "连通性验证", "[\"proxy\"]", "[]", "skipped", "上游失败", 0, 0, Some(30), None, Some(120));
-        let exec: StepExecutor = Arc::new(|step: &Step| {
+        store.upsert_task(
+            "t-create-1",
+            "create",
+            "demo",
+            "failed",
+            100,
+            Some(100),
+            Some(120),
+        );
+        store.upsert_node(
+            "t-create-1",
+            "net",
+            "创建网络",
+            "[]",
+            "[]",
+            "success",
+            "ok",
+            1,
+            1,
+            Some(30),
+            Some(100),
+            Some(105),
+        );
+        store.upsert_node(
+            "t-create-1",
+            "master",
+            "启动主节点",
+            "[\"net\"]",
+            "[]",
+            "success",
+            "ok",
+            1,
+            1,
+            Some(60),
+            Some(105),
+            Some(115),
+        );
+        let steps = serde_json::to_string(&vec![Step::Noop {
+            note: "p-ok".into(),
+        }])
+        .unwrap();
+        store.upsert_node(
+            "t-create-1",
+            "proxy",
+            "启动 newproxy 代理",
+            "[\"master\"]",
+            &steps,
+            "failed",
+            "docker 失败",
+            3,
+            1,
+            Some(120),
+            Some(116),
+            Some(120),
+        );
+        store.upsert_node(
+            "t-create-1",
+            "verify",
+            "连通性验证",
+            "[\"proxy\"]",
+            "[]",
+            "skipped",
+            "上游失败",
+            0,
+            0,
+            Some(30),
+            None,
+            Some(120),
+        );
+        let exec: StepExecutor = Arc::new(|_ctx: &StepCtx, step: &Step| {
             let note = match step {
                 Step::Noop { note } => note.clone(),
                 _ => "?".into(),
@@ -1458,7 +1707,10 @@ mod tests {
         });
         let sched = Arc::new(TaskScheduler::new(exec, Some(store.clone())));
         // 调度器内存为空(等价重启):重试 proxy
-        let r = sched.rerun_node("t-create-1", "proxy").await.expect("历史任务节点应可重试成功");
+        let r = sched
+            .rerun_node("t-create-1", "proxy")
+            .await
+            .expect("历史任务节点应可重试成功");
         assert!(r.contains("已重试成功"), "{r}");
         let v = sched.get("t-create-1").expect("水合后任务可见");
         let st_of = |id: &str| {
@@ -1478,7 +1730,12 @@ mod tests {
         let sv = store.task_view("t-create-1").unwrap();
         assert_eq!(sv["status"], "success");
         assert_eq!(
-            sv["nodes"].as_array().unwrap().iter().find(|n| n["id"].as_str() == Some("proxy")).unwrap()["status"],
+            sv["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|n| n["id"].as_str() == Some("proxy"))
+                .unwrap()["status"],
             "success"
         );
         // 真正不存在的任务 → 清晰错误
@@ -1492,16 +1749,44 @@ mod tests {
         use crate::store::{MemoryBackend, Store};
         let store = Arc::new(Store::from_backend(MemoryBackend::new()));
         // 模拟崩溃瞬间的持久化现场:任务 running,节点 a 已完成,节点 b 未完成(依赖 a)
-        store.upsert_task("t-create-1", "create", "demo", "running", 100, Some(100), None);
+        store.upsert_task(
+            "t-create-1",
+            "create",
+            "demo",
+            "running",
+            100,
+            Some(100),
+            None,
+        );
         store.upsert_node(
-            "t-create-1", "a", "A", "[]", "[]", "success", "a-output", 1, 1, Some(30), Some(100),
+            "t-create-1",
+            "a",
+            "A",
+            "[]",
+            "[]",
+            "success",
+            "a-output",
+            1,
+            1,
+            Some(30),
+            Some(100),
             Some(100),
         );
         store.upsert_node(
-            "t-create-1", "b", "B", "[\"a\"]", "[{\"Noop\":{\"note\":\"b-run\"}}]", "pending", "", 0,
-            1, Some(30), None, None,
+            "t-create-1",
+            "b",
+            "B",
+            "[\"a\"]",
+            "[{\"Noop\":{\"note\":\"b-run\"}}]",
+            "pending",
+            "",
+            0,
+            1,
+            Some(30),
+            None,
+            None,
         );
-        let exec: StepExecutor = Arc::new(|step: &Step| {
+        let exec: StepExecutor = Arc::new(|_ctx: &StepCtx, step: &Step| {
             let note = match step {
                 Step::Noop { note } => note.clone(),
                 _ => "?".into(),

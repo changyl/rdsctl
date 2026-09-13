@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# rdsctl 编译脚本(默认离线,复用仓库内 vendored registry)
+# rdsctl 编译脚本(默认离线:仓库根 .cargo-home + vendor/ 依赖源码替换)
 #
 # 用法:
 #   ./scripts/build.sh                # 离线 release 编译
@@ -18,7 +18,7 @@ set -euo pipefail
 
 help() {
   cat <<'EOF'
-rdsctl 编译脚本 — 默认离线(release),复用仓库内 .cargo-home vendored registry
+rdsctl 编译脚本 — 默认离线(release),依赖源码来自仓库内 vendor/(经 .cargo-home/config.toml 替换源)
 
 用法:
   ./scripts/build.sh                编译 release(离线)
@@ -70,11 +70,19 @@ for a in "$@"; do
 done
 [ "$DO_DRILL" = 1 ] && PROFILE="debug" # 演练脚本固定使用 debug 产物
 
-# 离线模式:优先使用仓库内 .cargo-home(预置 rsproxy 镜像缓存)
-if [ "$MODE" = "offline" ] && [ -d "$PWD/.cargo-home" ]; then
-  export CARGO_HOME="$PWD/.cargo-home"
-  CARGO_FLAGS="--offline"
-  info "CARGO_HOME=$CARGO_HOME (offline, rsproxy 镜像缓存)"
+# 离线模式:仓库根 .cargo-home/config.toml 提供 source replacement 指向 vendor/(依赖源码入库)
+# 注意:路径基于 $ROOT(而非 $PWD),否则从其它目录调用会静默退化为联网模式。
+if [ "$MODE" = "offline" ]; then
+  if [ -f "$ROOT/.cargo-home/config.toml" ] && [ -d "$ROOT/vendor" ]; then
+    export CARGO_HOME="$ROOT/.cargo-home"
+    CARGO_FLAGS="--offline"
+    info "CARGO_HOME=$CARGO_HOME (offline, vendor/ 源码替换)"
+  else
+    die "离线构建供给缺失:$ROOT/.cargo-home/config.toml 或 $ROOT/vendor 不存在。
+     修复:联网执行一次 ./scripts/build.sh --online 与
+       CARGO_HOME=\$PWD/.cargo-home CARGO_NET_OFFLINE=false cargo vendor --versioned-dirs vendor
+     或显式接受联网构建:./scripts/build.sh --online"
+  fi
 else
   CARGO_FLAGS=""
   info "联网模式(使用系统 CARGO_HOME)"

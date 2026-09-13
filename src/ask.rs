@@ -9,8 +9,8 @@
 
 use serde_json::{json, Value};
 
-use crate::instance::RdsInstance;
 use crate::insights::{label_of, playbook_hits};
+use crate::instance::RdsInstance;
 
 /// runbook 静态词条(值班 FAQ 语料 T1;关键词任一命中即算命中)
 pub struct Runbook {
@@ -22,7 +22,14 @@ pub struct Runbook {
 pub fn runbook_entries() -> Vec<Runbook> {
     vec![
         Runbook {
-            kw: &["复制中断", "slave", "从库", "io 线程", "applier", "start replica"],
+            kw: &[
+                "复制中断",
+                "slave",
+                "从库",
+                "io 线程",
+                "applier",
+                "start replica",
+            ],
             title: "复制中断处置",
             body: "核对 performance_schema 复制线程 SERVICE_STATE 与 LAST_ERROR;\
 恢复复制建议走 playbook start_replica(低风险;经人工确认后执行,先追平 GTID 再启动)。",
@@ -58,7 +65,16 @@ pub fn runbook_entries() -> Vec<Runbook> {
 可先人工确认失败原因后重试单步。",
         },
         Runbook {
-            kw: &["怎么", "如何", "处理", "解决", "修复", "怎么办", "步骤", "命令"],
+            kw: &[
+                "怎么",
+                "如何",
+                "处理",
+                "解决",
+                "修复",
+                "怎么办",
+                "步骤",
+                "命令",
+            ],
             title: "常规处置入口",
             body: "多数处置先看洞察面板:异常群给出同因批量处置模板;每个建议对应\
 playbook 且需人工确认;所有动作留审计。",
@@ -76,7 +92,15 @@ pub fn classify(q: &str) -> String {
     } else if has(&["状态", "现在", "当前", "status", "情况"]) {
         "status".to_string()
     } else if has(&[
-        "怎么", "如何", "处理", "解决", "修复", "怎么办", "步骤", "命令", "操作",
+        "怎么",
+        "如何",
+        "处理",
+        "解决",
+        "修复",
+        "怎么办",
+        "步骤",
+        "命令",
+        "操作",
     ]) {
         "faq".to_string()
     } else {
@@ -259,6 +283,7 @@ mod tests {
                 az: String::new(),
                 shard: String::new(),
                 parent: String::new(),
+                rpc_host_port: 0,
             }],
             proxy_container: format!("rds-{name}-proxy"),
             proxy_mysql_port: 35002,
@@ -303,7 +328,10 @@ mod tests {
         assert_eq!(v["intent"], "why");
         let text = v["text"].as_str().unwrap();
         assert!(text.contains("复制中断"), "{text}");
-        assert!(text.contains("start_replica") || text.contains("处置建议"), "{text}");
+        assert!(
+            text.contains("start_replica") || text.contains("处置建议"),
+            "{text}"
+        );
         let refs = v["refs"].as_array().unwrap();
         assert!(refs.iter().any(|r| r["type"] == "instance"));
         assert!(refs.iter().any(|r| r["type"] == "playbook"));
@@ -332,7 +360,9 @@ mod tests {
         let v = answer("磁盘满了怎么处理", None, &[]);
         assert_eq!(v["intent"], "faq");
         let refs = v["refs"].as_array().unwrap();
-        assert!(refs.iter().any(|r| r["type"] == "runbook" && r["label"] == "容量与扩容"));
+        assert!(refs
+            .iter()
+            .any(|r| r["type"] == "runbook" && r["label"] == "容量与扩容"));
         // 无命中回退文案(classify 经「操作」入 faq,但 runbook 关键词不含 → 零 refs)
         let v2 = answer("给我看下系统操作说明", None, &[]);
         assert_eq!(v2["intent"], "faq");

@@ -31,5 +31,9 @@
 
 - 接入层为进程内单点(与单进程控制端同生命周期,sweeper 自动恢复);
   生产化可演进为 keepalived 双机 VIP + ipvs,或独立接入网关;
+  **演进口径已定**:`RDSCTL_MODE=cluster` 下接入层独立为 `ingress` 角色,路由绑定入
+  共识日志(`IngressBind`)、入口以多地址暴露、端口由日志权威分配;承诺口径为
+  「多入口地址 + 快速重绑,RTO ≤5s(客户端需重连)」,不承诺单 VIP 无缝漂移。
+  详见 [control-plane-ha-design.md](./control-plane-ha-design.md) §10;
 - 转发器后端用 Proxy 宿主发布端口(单机 docker lab 语义),跨主机部署时改为
   Proxy 地址列表(字段同构,仅后端地址来源变化)。

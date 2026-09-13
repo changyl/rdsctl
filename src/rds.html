@@ -5142,6 +5142,41 @@
       grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
     }
 
+    /* 高可用版子选项(异步 / 半同步):只在选中「高可用版」时出现,属于该卡片的二级选择 */
+    .ha-mode {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      background: #fafbfc;
+    }
+
+    .ha-mode .c-l {
+      margin: 0;
+      font-weight: 600;
+      flex: none;
+    }
+
+    /* 占位卡(近期开放):不可选,虚线边框 + 降透明度,与可选项明确区分 */
+    .rcard.is-soon {
+      cursor: not-allowed;
+      border-style: dashed;
+      opacity: .6;
+      background: #fbfcfd;
+    }
+
+    .rcard.is-soon:hover {
+      border-color: var(--border);
+    }
+
+    .rcard.is-soon .rc-t {
+      color: var(--faint);
+    }
+
     .rcard {
       position: relative;
       border: 1px solid var(--border);
@@ -5729,13 +5764,24 @@
             <path d="M5 12v7c0 1.7 3.1 3 7 3s7-1.3 7-3v-7"></path>
           </svg>实例
         </button>
-        <button class="nav-item" data-view="hosts">
+        <button class="nav-item" data-view="nodes" id="nav-nodes">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
             stroke-linejoin="round" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="7" rx="2"></rect>
-            <rect x="3" y="13" width="18" height="7" rx="2"></rect>
-            <path d="M7 7.5h.01M7 16.5h.01"></path>
-          </svg>主机管理
+            <circle cx="12" cy="5" r="2.4"></circle>
+            <circle cx="5" cy="18" r="2.4"></circle>
+            <circle cx="19" cy="18" r="2.4"></circle>
+            <path d="M12 7.4v3.2"></path>
+            <path d="M11 12.2L6 15.9"></path>
+            <path d="M13 12.2l5 3.7"></path>
+          </svg>节点状态
+        </button>
+        <button class="nav-item" data-view="cluster" id="nav-cluster">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+            stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="6" rx="2"></rect>
+            <rect x="3" y="14" width="18" height="6" rx="2"></rect>
+            <path d="M7 7h.01M7 17h.01M12 10v4"></path>
+          </svg>管控集群
         </button>
         <button class="nav-item" data-view="tasks" id="nav-tasks">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
@@ -5776,6 +5822,16 @@
             <rect x="5" y="13" width="14" height="6" rx="2"></rect>
             <path d="M9 16h6"></path>
           </svg>代理管理
+        </button>
+        <!-- 主机管理:作为代理管理的下级入口 -->
+        <!-- 主机管理:紧邻代理管理之下(同层级导航项) -->
+        <button class="nav-item" data-view="hosts" id="nav-hosts">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+            stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="7" rx="2"></rect>
+            <rect x="3" y="13" width="18" height="7" rx="2"></rect>
+            <path d="M7 7.5h.01M7 16.5h.01"></path>
+          </svg>主机管理
         </button>
         <button class="nav-item" data-view="users" id="nav-users">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
@@ -5821,6 +5877,7 @@
               <span class="n" id="user-name">—</span>
               <span class="p" id="user-perms"></span>
             </span>
+            <button class="btn btn-ghost btn-sm" id="btn-logout" title="撤销当前会话(集群模式下对所有副本生效)">退出</button>
           </div>
         </div>
       </header>
@@ -5913,6 +5970,181 @@
               <span class="cnt" id="inst-more-cnt"></span>
               <button class="btn btn-ghost btn-sm" id="btn-top" hidden>回到第一页</button>
               <button class="btn btn-ghost btn-sm" id="btn-more" hidden>加载更多</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ═══ 节点状态(跨实例 DB/Proxy 节点汇总 · 运维动作) ═══ -->
+        <section class="view" id="view-nodes" hidden>
+          <div class="card">
+            <div class="card-head">
+              <h2>节点状态</h2>
+              <div class="desc">全实例 DB / Proxy 节点运行态 · 宿主机与执行通道 · 就地运维动作</div>
+              <span class="right mono" id="nd-total">—</span>
+            </div>
+            <div class="card-body" style="padding:12px 16px;">
+              <div class="field-row">
+                <div style="position:relative;flex:1;min-width:180px;max-width:280px;">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    aria-hidden="true"
+                    style="width:14px;height:14px;position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--faint);pointer-events:none;">
+                    <circle cx="11" cy="11" r="7"></circle>
+                    <path d="M21 21l-4.3-4.3"></path>
+                  </svg>
+                  <input class="inp" id="nd-q" placeholder="按容器名/实例名/端口/主机搜索" style="width:100%;padding-left:32px;"
+                    autocomplete="off" aria-label="按节点关键词搜索">
+                </div>
+                <input class="inp" id="nd-inst" placeholder="实例名(精确)" list="nd-inst-list" style="width:170px;"
+                  autocomplete="off" aria-label="按实例名筛选">
+                <datalist id="nd-inst-list"></datalist>
+                <select class="inp" id="nd-kind" aria-label="按节点类型筛选">
+                  <option value="">全部类型</option>
+                  <option value="db">DB 节点</option>
+                  <option value="proxy">Proxy 节点</option>
+                </select>
+                <select class="inp" id="nd-state" aria-label="按节点状态筛选">
+                  <option value="">全部状态</option>
+                  <option value="ok">正常</option>
+                  <option value="degraded">降级</option>
+                  <option value="repl_down">复制中断</option>
+                  <option value="down">MySQL 不可达</option>
+                  <option value="missing">容器缺失</option>
+                  <option value="stopped">服务已停止</option>
+                  <option value="remote">管理盲区(agent 失联)</option>
+                  <option value="unknown">未知</option>
+                </select>
+                <button class="btn btn-ghost btn-sm" id="nd-reset">重置</button>
+                <div style="flex:1;"></div>
+                <button class="btn btn-ghost btn-sm" id="nd-refresh">刷新</button>
+              </div>
+            </div>
+            <div class="card-body tight" id="nd-summary"
+              style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 16px;border-bottom:1px solid var(--border);">
+            </div>
+            <div class="tbl-scroll">
+              <table class="tbl" style="min-width:1320px;" aria-label="节点状态列表">
+                <thead>
+                  <tr>
+                    <th>实例</th>
+                    <th>类型</th>
+                    <th>容器</th>
+                    <th>角色</th>
+                    <th>节点状态</th>
+                    <th>监听地址</th>
+                    <th>宿主机</th>
+                    <th>执行通道</th>
+                    <th>实例状态</th>
+                    <th style="width:270px;">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="nd-rows"></tbody>
+              </table>
+            </div>
+            <div class="pager"><span class="cnt" id="nd-cnt"></span></div>
+          </div>
+        </section>
+
+        <!-- ═══ 管控集群(rdsctl 管控面自身的高可用集群) ═══ -->
+        <section class="view" id="view-cluster" hidden>
+          <!-- 首屏占位:数据未到时既不能说 single 也不能说 cluster,避免"进页先空一屏" -->
+          <div class="card" id="cl-loading">
+            <div class="card-head">
+              <h2>管控集群</h2>
+              <div class="desc" id="cl-loading-desc">正在读取集群视图…</div>
+            </div>
+          </div>
+          <!-- 单机模式:如实说明"没有集群",不给假数据 -->
+          <div class="card" id="cl-single" hidden>
+            <div class="card-head">
+              <h2>管控集群</h2>
+              <div class="desc">rdsctl 管控面自身的高可用集群(共识副本)</div>
+            </div>
+            <div class="card-body">
+              <div class="empty" id="cl-single-body"></div>
+            </div>
+          </div>
+
+          <div id="cl-wrap" hidden>
+            <div class="card">
+              <div class="card-head">
+                <h2>集群概览</h2>
+                <div class="desc" id="cl-sub">—</div>
+                <div class="right">
+                  <span class="mono" id="cl-gen" style="font-size:11px;color:var(--faint);"></span>
+                  <button class="btn btn-ghost btn-sm" id="cl-refresh" title="重新向各副本现场拉取一次">刷新</button>
+                  <button class="btn btn-soft btn-sm" id="cl-stepdown"
+                    title="让当前 leader 主动让位,由 raft 按「日志已追平优先」选择继任者并重新选主;秒级抖动,不丢已提交数据">主动让位</button>
+                  <button class="btn btn-ghost btn-sm" id="cl-resync"
+                    title="把 leader 的 sink 投影游标置 0,下一轮对账从日志幂等重放补齐(仅在 leader 上有效)">重建审计投影</button>
+                </div>
+              </div>
+              <div class="card-body">
+                <div class="kpi-grid" id="cl-kpis"></div>
+                <div class="c-hint" id="cl-local" style="margin-top:12px;"></div>
+              </div>
+            </div>
+
+            <div class="card list-card">
+              <div class="card-head">
+                <h2>集群成员</h2>
+                <div class="desc">每个副本的共识角色、日志进度、就绪状态与前提标注(由各副本现场上报,不代替多数派判定)</div>
+              </div>
+              <div class="tbl-scroll">
+                <table class="tbl" style="min-width:1320px;" aria-label="管控集群成员">
+                  <thead>
+                    <tr>
+                      <th>节点</th>
+                      <th>地址</th>
+                      <th>角色</th>
+                      <th>term</th>
+                      <th>leader</th>
+                      <th>提交 / 应用</th>
+                      <th>复制进度(leader 视角)</th>
+                      <th>就绪</th>
+                      <th>前提 / 降级</th>
+                      <th>运行时长</th>
+                    </tr>
+                  </thead>
+                  <tbody id="cl-rows"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="card list-card">
+              <div class="card-head">
+                <h2>实例租约台账</h2>
+                <div class="desc">实例互斥的权威来源(共识状态机)· 谁持有 / fence / 剩余 TTL</div>
+                <span class="right mono" id="cl-lease-cnt"></span>
+                <button class="btn btn-ghost btn-sm" id="cl-lease-toggle" hidden
+                  title="已过期的租约只是残留(不再阻塞新授予),默认折叠以免被误读成异常">显示已过期</button>
+              </div>
+              <div class="tbl-scroll">
+                <table class="tbl" aria-label="实例租约台账">
+                  <thead>
+                    <tr>
+                      <th>实例</th>
+                      <th>holder</th>
+                      <th>fence(term, index)</th>
+                      <th>TTL</th>
+                      <th>剩余</th>
+                      <th>续约次数</th>
+                    </tr>
+                  </thead>
+                  <tbody id="cl-lease-rows"></tbody>
+                </table>
+              </div>
+              <div class="card-body" id="cl-lease-empty"
+                style="display:none;padding:22px 16px;text-align:center;color:var(--faint);">
+                当前没有活跃的实例租约 —— 实例互斥只在有实例操作(创建/扩容/切换/销毁/查询写)持有期间存在。
+              </div>
+            </div>
+
+            <div class="card list-card">
+              <div class="card-head">
+                <h2>读法说明</h2>
+                <div class="desc">本页只呈现观测到的事实,不做推断</div>
+              </div>
+              <div class="card-body tight" id="cl-notes"></div>
             </div>
           </div>
         </section>
@@ -6051,6 +6283,7 @@
                         <option value="async">主从异步(默认)</option>
                         <option value="sync">主从同步</option>
                         <option value="single">单实例</option>
+                        <option value="xenon">Xenon Raft 高可用</option>
                       </select>
                     </div>
                     <div class="cf"><label class="c-l">Proxy 数</label>
@@ -6354,6 +6587,53 @@
             </div>
             <div class="card-body">
 
+              <!-- 第一步:架构主入口(先选架构,再进配置表单) -->
+              <div class="csec" id="c-step-arch">
+                <div class="csec-hd">
+                  <h3>选择数据库架构 <span class="pill pill--blue" style="padding:0 7px;font-size:10px;">第一步</span></h3>
+                  <span class="csub">先选定架构类型,下面展开对应的配置表单</span>
+                </div>
+                <div class="csec-bd">
+                  <div class="rcards" id="c-arch">
+                    <div class="rcard" data-arch="single">
+                      <div class="rc-t"><span class="rc-ic">S</span>单节点</div>
+                      <div class="rc-d">仅单个数据库节点,无高可用,适用于开发测试等非生产环境。</div>
+                      <div class="rc-dia">单节点</div>
+                    </div>
+                    <div class="rcard" data-arch="ha">
+                      <div class="rc-t"><span class="rc-ic">HA</span>高可用版 <span class="pill pill--blue"
+                          style="padding:0 7px;font-size:10px;">推荐</span></div>
+                      <div class="rc-d">一主多从 + 受管切换:主库故障自动切换(ERS)/ 计划切换(PRS),容灾能力完整;复制模式可选异步或半同步。</div>
+                      <div class="rc-dia">主库 <i>→</i> 从库 · 复制模式:<b id="c-ha-badge">异步</b></div>
+                    </div>
+                    <div class="rcard" data-arch="xenon">
+                      <div class="rc-t"><span class="rc-ic">XR</span>Xenon Raft 高可用 <span class="pill pill--blue"
+                          style="padding:0 7px;font-size:10px;">raft 选主</span></div>
+                      <div class="rc-d">MySQL raft 集群:后台复制仍为半同步,由 raft 共识协议自动选主/故障转移;可选前置 rsproxy 代理(读分流,三档一致性)。</div>
+                      <div class="rc-dia">节点1(LEADER) <i>⇄</i> 节点2 <i>⇄</i> 节点3</div>
+                    </div>
+                    <div class="rcard is-soon" id="c-arch-soon-ob" aria-disabled="true">
+                      <div class="rc-t"><span class="rc-ic">OB</span>OceanBase <span class="pill pill--gray"
+                          style="padding:0 7px;font-size:10px;">近期开放</span></div>
+                      <div class="rc-d">分布式数据库(OceanBase):多副本 Paxos 高可用、按 Zone 水平扩展。管控端集群模板与引擎镜像接入中,暂不可创建。</div>
+                      <div class="rc-dia">Zone1 <i>⇄</i> Zone2 <i>⇄</i> Zone3</div>
+                    </div>
+                  </div>
+                  <!-- 高可用版的二级选择:异步 / 半同步(选中「高可用版」后才出现) -->
+                  <div class="ha-mode" id="c-ha-mode" style="display:none;">
+                    <span class="c-l">高可用版复制模式</span>
+                    <div class="cseg" id="c-ha-seg" role="radiogroup" aria-label="高可用版复制模式">
+                      <button class="on" data-ha="async" role="radio" aria-checked="true">异步复制(推荐)</button><button
+                        data-ha="sync" role="radio" aria-checked="false">半同步复制</button>
+                    </div>
+                    <span class="c-hint" style="margin:0;">异步:主库提交不等待从库确认,吞吐优先;半同步:主库等待从库确认落盘,一致性更强(适合交易/核心库)</span>
+                  </div>
+                  <div class="c-hint" id="c-arch-hint">点击选择架构,进入下一步配置</div>
+                </div>
+              </div>
+
+              <!-- 第二步:配置表单(选中架构前整体隐藏) -->
+              <div id="c-step-form" style="display:none;">
               <!-- 基础信息 -->
               <div class="csec">
                 <div class="csec-hd">
@@ -6436,22 +6716,61 @@
                 </div>
                 <div class="csec-bd">
                   <div class="c-l">DB 架构类型 <i class="req">*</i></div>
-                  <div class="rcards" id="c-itype">
+                  <div class="rcards" id="c-itype" style="display:none;" aria-hidden="true">
+                    <div class="rcard" data-itype="single">
+                      <div class="rc-t">单节点</div>
+                      <div class="rc-d">仅单个数据库节点，无高可用，适用于开发测试等非生产环境。</div>
+                      <div class="rc-dia">单节点</div>
+                    </div>
                     <div class="rcard on" data-itype="async">
-                      <div class="rc-t"><span class="rc-ic">DB</span>主从异步 <span class="pill pill--blue"
+                      <div class="rc-t"><span class="rc-ic">HA</span>主从异步 <span class="pill pill--blue"
                           style="padding:0 7px;font-size:10px;">推荐</span></div>
                       <div class="rc-d">主-从异步复制，适用于大多数业务场景，具备高可用容灾能力。</div>
                       <div class="rc-dia">主库 <i>→</i> 从库</div>
                     </div>
                     <div class="rcard" data-itype="sync">
-                      <div class="rc-t">主从同步</div>
+                      <div class="rc-t"><span class="rc-ic">HA</span>主从半同步</div>
                       <div class="rc-d">主从同步复制(半同步):主库写入等待从库确认落盘,数据一致性更强,适合交易/核心业务。</div>
                       <div class="rc-dia">主库 <i>→</i> 从库(同步确认)</div>
                     </div>
-                    <div class="rcard" data-itype="single">
-                      <div class="rc-t">单节点</div>
-                      <div class="rc-d">仅单个数据库节点，无高可用，适用于开发测试等非生产环境。</div>
-                      <div class="rc-dia">单节点</div>
+                    <div class="rcard" data-itype="xenon">
+                      <div class="rc-t"><span class="rc-ic">XR</span>Xenon Raft 高可用 <span class="pill pill--blue"
+                          style="padding:0 7px;font-size:10px;">raft 选主</span></div>
+                      <div class="rc-d">基于 Xenon 的 MySQL raft 集群:后台复制仍为半同步(与主从同步同源),raft 共识协议负责自动选主/故障转移;可选前置 rsproxy 代理自动跟随 leader 并提供读分流;需本地已有 xenon-local 镜像。</div>
+                      <div class="rc-dia">节点1(LEADER) <i>⇄</i> 节点2 <i>⇄</i> 节点3</div>
+                    </div>
+                  </div>
+
+                  <div id="c-xenon-opts" style="display:none;">
+                    <div class="crow" id="c-xenon-nodes-row" style="margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                      <span class="c-l" style="margin:0;flex:none;font-weight:600;">Raft 节点数</span>
+                      <select class="inp" id="c-xenon_nodes" style="width:140px;" aria-label="Raft 节点数">
+                        <option value="3" selected>3(推荐)</option>
+                        <option value="5">5</option>
+                        <option value="1">1(仅实验)</option>
+                      </select>
+                      <span class="c-hint" style="margin:0;">≥3 才有容错(奇数推荐);每节点独立容器(mysqld+xenon)</span>
+                    </div>
+                    <div class="crow" id="c-xenon-proxy-row" style="margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                      <span class="c-l" style="margin:0;flex:none;font-weight:600;">前置 rsproxy 代理</span>
+                      <select class="inp" id="c-xenon_proxy" style="width:170px;" aria-label="rsproxy 实例数">
+                        <option value="0">不部署(业务直连节点)</option>
+                        <option value="2" selected>2 个(推荐 · 高可用接入)</option>
+                        <option value="1">1 个</option>
+                        <option value="3">3 个</option>
+                        <option value="4">4 个</option>
+                      </select>
+                      <span class="c-hint" style="margin:0;">rsproxy 自动发现并跟随 raft leader(写全走主),经 LVS VIP 统一接入</span>
+                    </div>
+                    <div class="crow" id="c-xenon-consistency-row" style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                      <span class="c-l" style="margin:0;flex:none;font-weight:600;">读一致性档位</span>
+                      <select class="inp" id="c-xenon_consistency" style="width:220px;" aria-label="读一致性档位">
+                        <option value="strong" selected>strong(全走 leader · 线性化)</option>
+                        <option value="causal">causal(跨客户端因果 · GTID 屏障)</option>
+                        <option value="session">session(读己之写 · 会话单调读)</option>
+                        <option value="eventual">eventual(直读 follower · 业务自担)</option>
+                      </select>
+                      <span class="c-hint" style="margin:0;">只作用于可分流纯读;写与事务始终走 leader</span>
                     </div>
                   </div>
 
@@ -6584,13 +6903,15 @@
 
                   <div style="display:flex;gap:10px;margin-top:18px;">
                     <button class="btn btn-primary" id="c-submit">提交创建</button>
+                    <button class="btn btn-ghost" id="c-arch-back">← 重选架构</button>
                     <button class="btn btn-ghost" id="c-cancel">取消</button>
                     <span id="c-err" style="align-self:center;color:var(--err);font-size:12px;"></span>
                   </div>
                 </div>
               </div>
+              </div><!-- /c-step-form -->
+              </div>
             </div>
-          </div>
         </section>
 
         <!-- ═══ 分片详情 ═══ -->
@@ -6617,7 +6938,7 @@
           </div>
           <div class="card" style="margin-top:14px;">
             <div class="card-head">
-              <h2>主从节点</h2><span class="desc">该分片的复制拓扑(主 → 从)</span>
+              <h2>主从节点</h2><span class="desc" id="shard-nodes-desc">该分片的复制拓扑(主 → 从)</span>
             </div>
             <div class="card-body" id="shard-nodes"></div>
           </div>
@@ -7305,7 +7626,7 @@
       var ALERT_SEV = { critical: { mod: "red", label: "严重" }, warn: { mod: "amber", label: "警告" }, info: { mod: "blue", label: "提示" } };
       var ALERT_ST = { open: { mod: "red", label: "待处理" }, ack: { mod: "amber", label: "处理中" }, resolved: { mod: "gray", label: "已解决" } };
       var KIND_CN = { create: "创建实例", destroy: "销毁实例", scaleout: "扩容实例", backup: "逻辑备份", user: "自定义草稿", module: "功能模块" };
-      var PERM_CN = { instances: "实例", tasks: "任务", audit: "审计", alerts: "告警", users: "用户", roles: "角色" };
+      var PERM_CN = { instances: "实例", tasks: "任务", audit: "审计", alerts: "告警", users: "用户", roles: "角色", cluster: "管控集群" };
       var ROLE_CN = { super: "超级管理员" };
 
       function statusPill(st, pulsing) {
@@ -7552,10 +7873,12 @@
       }
 
       /* ═══ 导航 / 路由 ═══ */
-      var VIEW_IDS = ["view-overview", "view-instances", "view-hosts", "view-create", "view-tasks", "view-audit", "view-alerts", "view-insights", "view-proxies", "view-users", "view-detail", "view-shard"];
+      var VIEW_IDS = ["view-overview", "view-instances", "view-nodes", "view-cluster", "view-hosts", "view-create", "view-tasks", "view-audit", "view-alerts", "view-insights", "view-proxies", "view-users", "view-detail", "view-shard"];
       var VIEW_TITLE = {
         overview: ["概览", "实例状态分布与运行概况"],
         instances: ["实例", "容器化 MySQL 实例 · 生命周期管理"],
+        nodes: ["节点状态", "全实例 DB / Proxy 节点运行态 · 宿主机与执行通道 · 就地运维"],
+        cluster: ["管控集群", "rdsctl 管控面自身的高可用集群 · 成员/共识/租约/运维动作"],
         hosts: ["主机管理", "物理机注册表 · 容量/rack/agent · 迁移与替换目标"],
         tasks: ["任务", "DAG 执行中心 · 任务编排"],
         audit: ["审计", "全量操作留痕"],
@@ -7589,10 +7912,12 @@
       function navTo(page) {
         var dagPane = page === "dag";
         if (dagPane) page = "tasks";
-        var map = { overview: "view-overview", instances: "view-instances", hosts: "view-hosts", create: "view-create", tasks: "view-tasks", audit: "view-audit", alerts: "view-alerts", insights: "view-insights", proxies: "view-proxies", users: "view-users", detail: "view-detail", shard: "view-shard" };
+        var map = { overview: "view-overview", instances: "view-instances", nodes: "view-nodes", cluster: "view-cluster", hosts: "view-hosts", create: "view-create", tasks: "view-tasks", audit: "view-audit", alerts: "view-alerts", insights: "view-insights", proxies: "view-proxies", users: "view-users", detail: "view-detail", shard: "view-shard" };
         var id = map[page];
         if (page === "users" && !hasPerm("users.manage") && !hasPerm("roles.manage")) { toast("无权限访问用户与权限", "err"); return; }
         if (page === "hosts" && !hasPerm("instances.view")) { toast("无 instances.view 权限", "err"); return; }
+        if (page === "nodes" && !hasPerm("instances.view")) { toast("无 instances.view 权限", "err"); return; }
+        if (page === "cluster" && !hasPerm("cluster.view")) { toast("无 cluster.view 权限", "err"); return; }
         if (page !== "detail") STATE.current = null;
         if (page === "detail" && !STATE.current) page = "instances", id = map.instances;
         setView(id);
@@ -7602,8 +7927,24 @@
         $("#pg-sub").textContent = t[1];
         closeSidebar();
         if (page === "create" && !hasPerm("instances.create")) { toast("无 instances.create 权限", "err"); return; }
-        if (page === "create") { STATE.current = null; }
+        if (page === "create") {
+          STATE.current = null;
+          // 两段式:每次进入回到第一步(架构主入口);表单收起,清空错误提示
+          var form = $("#c-step-form");
+          if (form) form.style.display = "none";
+          var hint = $("#c-arch-hint");
+          if (hint) hint.textContent = "点击选择架构,进入下一步配置";
+          // 一并收起上一轮的选中态与高可用版二级选择(避免"看起来已经选过")
+          var haRow = $("#c-ha-mode");
+          if (haRow) haRow.style.display = "none";
+          $$("#c-arch .rcard").forEach(function (x) { x.classList.remove("on"); });
+          var err = $("#c-err");
+          if (err) err.textContent = "";
+          try { $("#c-step-arch").scrollIntoView({ block: "start" }); } catch (e) { /* 忽略 */ }
+        }
         if (page === "hosts") renderHosts();
+        else if (page === "nodes") { nodeFetch(); tick(true); }
+        else if (page === "cluster") { clusterFetch(false); }
         else if (page === "users") {
           switchUsersTab(hasPerm("users.manage") ? "users" : "roles");
         } else if (page === "alerts") tick(true);
@@ -7633,6 +7974,8 @@
         else if (h.indexOf("/proxies") === 0) navTo("proxies");
         else if (h.indexOf("/users") === 0) navTo("users");
         else if (h.indexOf("/hosts") === 0) navTo("hosts");
+        else if (h.indexOf("/nodes") === 0) navTo("nodes");
+        else if (h.indexOf("/cluster") === 0) navTo("cluster");
         else if (h.indexOf("/alerts") === 0) navTo("alerts");
         else if (h.indexOf("/insights") === 0) navTo("insights");
         else if (h.indexOf("/audit") === 0) navTo("audit");
@@ -9132,6 +9475,468 @@
         } catch (e) { toast(e.message, "err"); }
       }
 
+      /* ═══ 节点状态(跨实例 DB/Proxy 节点汇总 + 就地运维) ═══ */
+      var ND = { rows: [], summary: null, state: "" };
+      var ND_KIND = { db: { mod: "blue", label: "DB" }, proxy: { mod: "violet", label: "Proxy" } };
+      var ND_STATE = {
+        ok: { mod: "ok", label: "正常" },
+        degraded: { mod: "amber", label: "降级" },
+        repl_down: { mod: "orange", label: "复制中断" },
+        down: { mod: "red", label: "MySQL 不可达" },
+        missing: { mod: "red", label: "容器缺失" },
+        stopped: { mod: "slate", label: "服务已停止" },
+        remote: { mod: "violet", label: "管理盲区" },
+        unknown: { mod: "gray", label: "未知" }
+      };
+      var ND_ROUTE = {
+        local: { mod: "gray", label: "本机", tip: "由管控进程在本机直接执行 docker/mysql" },
+        agent: { mod: "ok", label: "agent", tip: "经宿主机 agent 执行(集群模式下带 fence/幂等键校验)" },
+        unmanaged: { mod: "amber", label: "未接入", tip: "已绑定宿主机但 agent 未接入,无法执行节点操作" }
+      };
+      var ND_ACT = {
+        proxy_health: { label: "健康", cls: "btn-ghost", tip: "检查代理容器运行与健康检测" },
+        proxy_start: { label: "启动", cls: "btn-soft", tip: "启动代理容器" },
+        proxy_restart: { label: "重启", cls: "btn-ghost", tip: "重启代理容器" },
+        proxy_stop: { label: "停止", cls: "btn-danger", tip: "停止后该代理不再承接流量" },
+        xenon_trytoleader: { label: "切为 raft leader", cls: "btn-soft", tip: "对该成员发起 raft 竞选(需多数派达成,期间秒级不可写)" },
+        reparent_to_this: { label: "受管切主到该节点", cls: "btn-soft", tip: "PRS 计划切换:提升该从节点为主,旧主置只读并重挂" },
+        detail: { label: "详情", cls: "btn-ghost", tip: "打开实例详情页" }
+      };
+      var ND_ITYPE = { async: "主从异步", sync: "主从同步", xenon: "Xenon Raft", single: "单节点", distributed: "分布式" };
+
+      function ndPill(meta) {
+        var m = meta || { mod: "gray", label: "-" };
+        return '<span class="pill pill--' + m.mod + '" style="padding:0 7px;font-size:11px;">' + esc(m.label) + "</span>";
+      }
+      function ndStat(label, n, mod) {
+        return '<span class="pill pill--' + mod + '" style="padding:2px 9px;font-size:11px;">' + esc(label) +
+          " <b>" + n + "</b></span>";
+      }
+      function nodeStatePill(st) {
+        var m = ND_STATE[st] || { mod: "gray", label: st || "未知" };
+        return '<span class="pill pill--' + m.mod + '"><i class="dot"></i>' + esc(m.label) + "</span>";
+      }
+      function ndQuery() {
+        var p = new URLSearchParams();
+        p.set("limit", "2000");
+        p.set("offset", "0");
+        var q = (($("#nd-q") || {}).value || "").trim();
+        var inst = (($("#nd-inst") || {}).value || "").trim();
+        var kind = ($("#nd-kind") || {}).value || "";
+        if (q) p.set("q", q);
+        if (inst) p.set("instance", inst);
+        if (kind) p.set("kind", kind);
+        return p.toString();
+      }
+      // 状态筛选在前端完成(后端契约无 state 参数);返回集为全量匹配(limit 2000),故前端过滤与汇总均精确
+      function ndVisible() {
+        if (!ND.state) return ND.rows;
+        return ND.rows.filter(function (r) { return (r.state || "unknown") === ND.state; });
+      }
+      function nodeFetch(quiet) {
+        return jget("/api/rds/nodes?" + ndQuery()).then(function (d) {
+          ND.rows = (d && d.nodes) || [];
+          ND.summary = (d && d.summary) || null;
+          var dl = $("#nd-inst-list");
+          if (dl) {
+            var seen = {}, names = [];
+            ND.rows.forEach(function (r) {
+              if (r.instance && !seen[r.instance]) { seen[r.instance] = 1; names.push(r.instance); }
+            });
+            dl.innerHTML = names.map(function (n) { return '<option value="' + esc(n) + '"></option>'; }).join("");
+          }
+          renderNodes();
+        }).catch(function (e) { if (!quiet) toast("节点数据加载失败:" + e.message, "err"); });
+      }
+      function renderNodes() {
+        var box = $("#nd-rows");
+        if (!box) return;
+        var all = ND.rows, list = ndVisible();
+        var c = { db: 0, proxy: 0, ok: 0, bad: 0, remote: 0, unknown: 0, off: 0 };
+        list.forEach(function (r) {
+          if (r.kind === "db") c.db++; else if (r.kind === "proxy") c.proxy++;
+          var st = r.state || "unknown";
+          if (st === "ok") c.ok++;
+          else if (st === "remote") c.remote++;
+          else if (st === "unknown") c.unknown++;
+          else c.bad++;
+          if (r.enabled === false) c.off++;
+        });
+        $("#nd-total").textContent = "共 " + list.length + " 个节点" +
+          (ND.state ? " · 状态筛选:" + ((ND_STATE[ND.state] || {}).label || ND.state) : "");
+        $("#nd-summary").innerHTML =
+          ndStat("节点", list.length, "slate") + ndStat("DB", c.db, "blue") + ndStat("Proxy", c.proxy, "violet") +
+          ndStat("正常", c.ok, "ok") + ndStat("异常", c.bad, c.bad ? "red" : "gray") +
+          ndStat("管理盲区", c.remote, c.remote ? "violet" : "gray") +
+          (c.unknown ? ndStat("未知", c.unknown, "gray") : "") +
+          (c.off ? ndStat("实例停用", c.off, "gray") : "") +
+          '<span style="font-size:11px;color:var(--faint);">状态来自巡检事实;管理盲区 = 已绑定宿主机但 agent 不可达(未做本机检查)</span>';
+        $("#nd-cnt").textContent = "匹配 " + list.length + " / " +
+          ((ND.summary && ND.summary.total_matched != null) ? ND.summary.total_matched : all.length) + " 条";
+        box.innerHTML = "";
+        if (!list.length) {
+          box.innerHTML = '<tr class="trow-empty"><td colspan="10"><div class="empty">' + svg("db") +
+            '<div class="t">暂无匹配节点</div><div class="s">' +
+            (all.length ? "当前状态筛选下没有节点,试试「重置」" : "创建实例后,其 DB / Proxy 节点会汇总在这里") +
+            "</div></div></td></tr>";
+          return;
+        }
+        var manage = hasPerm("instances.manage");
+        list.forEach(function (r) {
+          var tr = document.createElement("tr");
+          var kind = ND_KIND[r.kind] || { mod: "gray", label: r.kind || "-" };
+          var kindHtml = ndPill(kind) + ' <span style="font-size:11px;color:var(--faint);">' +
+            esc(ND_ITYPE[r.itype] || r.itype || "") + "</span>";
+          var host = r.host_name
+            ? '<span class="mono">' + esc(r.host_name) + "</span>"
+            : '<span style="color:var(--faint);">本机</span>';
+          var loc = [r.host_region, r.host_az, r.host_rack ? "rack:" + r.host_rack : ""].filter(Boolean).join(" / ");
+          if (loc) host += '<div class="mono" style="font-size:11px;color:var(--faint);">' + esc(loc) + "</div>";
+          var rm = ND_ROUTE[r.exec_route] || { mod: "gray", label: r.exec_route || "-", tip: "" };
+          var route = '<span class="pill pill--' + rm.mod + '" style="padding:0 7px;font-size:11px;" title="' +
+            esc(rm.tip) + '">' + esc(rm.label) + (r.agent_port ? ":" + r.agent_port : "") + "</span>";
+          var addr = (r.addr && !/:0$/.test(r.addr)) ? r.addr
+            : (r.host_port ? "127.0.0.1:" + r.host_port : (r.mysql_port ? "127.0.0.1:" + r.mysql_port : "-"));
+          var instSt = statusPill(r.instance_status || "unknown") +
+            (r.enabled === false ? " " + enabledPill() : "");
+          var ops = "";
+          if (manage) {
+            (r.actions || []).forEach(function (a) {
+              var m = ND_ACT[a];
+              if (!m) return;
+              ops += '<button class="btn ' + m.cls + ' btn-sm" data-nd="' + esc(a) + '" data-ndc="' + esc(r.container) +
+                '" data-ndi="' + esc(r.instance) + '" title="' + esc(m.tip) + '">' + esc(m.label) + "</button>";
+            });
+          }
+          if (!ops) ops = '<span style="color:var(--faint);font-size:12px;">' + (manage ? "-" : "只读") + "</span>";
+          tr.innerHTML = "<td>" + linkInst(r.instance) + "</td>" +
+            "<td>" + kindHtml + "</td>" +
+            '<td class="mono" style="font-weight:600;">' + esc(r.container) + "</td>" +
+            "<td>" + esc(r.role_label || r.role || "-") + "</td>" +
+            "<td>" + nodeStatePill(r.state) + "</td>" +
+            '<td class="mono">' + esc(addr) + "</td>" +
+            "<td>" + host + "</td>" +
+            "<td>" + route + "</td>" +
+            "<td>" + instSt + "</td>" +
+            "<td>" + ops + "</td>";
+          box.appendChild(tr);
+        });
+      }
+      async function nodeAct(container, action, inst) {
+        if (action === "detail") { setRoute("#/i/" + encodeURIComponent(inst)); return; }
+        try {
+          if (action === "proxy_stop") {
+            if (!await confirmDlg("停止代理 " + container, "停止后该代理不再承接读写流量;<br>确认停止?", true)) return;
+            var d = await jpost("/api/rds/proxy?container=" + encodeURIComponent(container) + "&action=stop");
+            toast(d.message || "已停止", "ok");
+          } else if (action === "proxy_start" || action === "proxy_restart" || action === "proxy_health") {
+            var d2 = await jpost("/api/rds/proxy?container=" + encodeURIComponent(container) +
+              "&action=" + action.replace("proxy_", ""));
+            toast(d2.message || "操作成功", "ok");
+          } else if (action === "xenon_trytoleader") {
+            var ok = await riskDlg("切换 raft leader 到 " + container,
+              "将向 <b>" + esc(container) + "</b> 发起 raft 竞选(xenoncli raft trytoleader)。<br>" +
+              "需多数派成员达成一致后切换完成,期间存在<b>秒级不可写窗口</b>;竞选失败则保持原角色。全程审计。",
+              "发起竞选", [inst]);
+            if (!ok) return;
+            var d3 = await jpost("/api/rds/xenon/raft/trytoleader?instance=" + encodeURIComponent(inst) +
+              "&node=" + encodeURIComponent(container));
+            toast("已发起竞选:" + (d3.message || "ok"), "ok");
+          } else if (action === "reparent_to_this") {
+            var ok2 = await riskDlg("受管切主到 " + container,
+              "将对 <b>" + esc(inst) + "</b> 执行计划切换(PRS):提升 <b>" + esc(container) +
+              "</b> 为主,旧主置只读并重挂为新主从。<br>要求旧主在线;失败自动回滚只读并降级告警。全程审计。",
+              "确认切换", [inst]);
+            if (!ok2) return;
+            var d4 = await jpost("/api/rds/orch/reparent?instance=" + encodeURIComponent(inst) +
+              "&target=" + encodeURIComponent(container) + "&mode=planned");
+            toast("受管切换已提交:" + (d4.op_id || ""), "ok");
+          } else return;
+        } catch (e) { toast(e.message, "err"); return; }
+        STATE.sig.px = "";
+        setTimeout(function () { nodeFetch(); }, 1200);
+      }
+      (function initNodesView() {
+        var bind = function (id, ev, fn) { var el = $("#" + id); if (el) el.addEventListener(ev, fn); };
+        bind("nd-q", "keydown", function (e) { if (e.key === "Enter") nodeFetch(); });
+        bind("nd-inst", "keydown", function (e) { if (e.key === "Enter") nodeFetch(); });
+        bind("nd-kind", "change", function () { nodeFetch(); });
+        bind("nd-state", "change", function () { ND.state = $("#nd-state").value; renderNodes(); });
+        bind("nd-refresh", "click", function () { nodeFetch(); });
+        bind("nd-reset", "click", function () {
+          $("#nd-q").value = ""; $("#nd-inst").value = ""; $("#nd-kind").value = "";
+          $("#nd-state").value = ""; ND.state = "";
+          nodeFetch();
+        });
+        var rows = $("#nd-rows");
+        if (rows) {
+          rows.addEventListener("click", function (e) {
+            var b = e.target.closest("[data-nd]");
+            if (!b) return;
+            nodeAct(b.dataset.ndc, b.dataset.nd, b.dataset.ndi);
+          });
+        }
+      })();
+
+      /* ═══ 管控集群(rdsctl 管控面自身的高可用集群) ═══ */
+      var CL = { data: null, at: 0, showExpired: false };
+      var CL_ROLE = {
+        leader: { mod: "ok", label: "LEADER" },
+        follower: { mod: "blue", label: "FOLLOWER" },
+        candidate: { mod: "amber", label: "CANDIDATE" },
+        learner: { mod: "slate", label: "LEARNER" }
+      };
+      function clPill(role) {
+        var m = CL_ROLE[role] || { mod: "gray", label: role || "?" };
+        return '<span class="pill pill--' + m.mod + '"><i class="dot"></i>' + esc(m.label) + "</span>";
+      }
+      // 从未收到响应(null)必须与"刚刚收到"(0ms)区分显示
+      function clAgo(ms) {
+        if (ms == null) return '<span style="color:var(--faint);" title="本进程从未收到该成员的响应">从未</span>';
+        if (ms < 1000) return esc(ms + "ms");
+        if (ms < 60000) return esc(Math.round(ms / 1000) + "s");
+        return esc(Math.round(ms / 60000) + "min");
+      }
+      function clDur(ms) {
+        if (ms == null) return "-";
+        var s = Math.floor(ms / 1000);
+        if (s < 60) return s + "s";
+        if (s < 3600) return Math.floor(s / 60) + "m" + pad2(s % 60) + "s";
+        return Math.floor(s / 3600) + "h" + pad2(Math.floor((s % 3600) / 60)) + "m";
+      }
+      function clusterFetch(quiet) {
+        return jget("/api/rds/cluster").then(function (d) {
+          CL.data = d;
+          CL.at = Date.now();
+          renderCluster();
+        }).catch(function (e) {
+          // 没有任何数据时,把失败写在占位卡上(否则页面上什么都不显示)
+          if (!CL.data) {
+            $("#cl-loading").hidden = false;
+            $("#cl-loading-desc").textContent = "读取集群视图失败:" + e.message + "(点「刷新」重试)";
+          }
+          if (!quiet) toast("集群视图加载失败:" + e.message, "err");
+        });
+      }
+      function renderCluster() {
+        var d = CL.data;
+        if (!d) return;
+        var on = d.enabled === true;
+        $("#cl-loading").hidden = true;
+        $("#cl-single").hidden = on;
+        $("#cl-wrap").hidden = !on;
+        if (!on) {
+          $("#cl-single-body").innerHTML = svg("server") +
+            '<div class="t">未启用管控集群(' + esc(d.mode || "single") + " 模式)</div>" +
+            '<div class="s">' + esc(((d.notes || [])[0]) || "") + "</div>";
+          return;
+        }
+        var members = d.members || [];
+        var q = d.quorum || {};
+        var leases = d.leases || [];
+        var me = members.filter(function (m) { return m.is_self; })[0] || {};
+        var voters = q.voters != null ? q.voters : members.length;
+        var reach = q.reachable != null ? q.reachable : members.filter(function (m) { return m.reachable; }).length;
+        $("#cl-gen").textContent = d.generated_at_ms ? "取样于 " + fmtTime(Math.floor(d.generated_at_ms / 1000)) : "";
+        $("#cl-sub").textContent = "本副本 " + (d.node_id || "-") + " · shard " +
+          (me.shard != null ? me.shard : "-") + " · " + voters + " 副本(多数派 " + (Math.floor(voters / 2) + 1) + ")";
+
+        var box = $("#cl-kpis");
+        box.innerHTML = "";
+        box.appendChild(kpiCard(reach + " / " + voters, "可达副本", reach * 2 > voters ? "accent-ok" : "accent-red",
+          "server", null, q.ok ? "本副本判定:多数派可达" : "本副本判定:无多数派"));
+        box.appendChild(kpiCard(q.leader || "无", "当前 leader", q.leader ? "accent-blue" : "accent-amber",
+          "check", null, q.leader_addr || "选主中"));
+        box.appendChild(kpiCard("T" + (q.term != null ? q.term : "-"), "任期 term", "accent-violet",
+          "clock", null, "每次选主递增"));
+        box.appendChild(kpiCard(leases.length, "活跃实例租约", leases.length ? "accent-org" : "accent-ok",
+          "lock", null, "实例互斥台账"));
+        box.appendChild(kpiCard(me.commit_index != null ? me.commit_index : "-", "本副本 commit", "accent-blue",
+          "db", null, "applied " + (me.applied_index != null ? me.applied_index : "-")));
+        box.appendChild(kpiCard(me.kv_len != null ? me.kv_len : "-", "状态机条目", "accent-amber",
+          "table", null, "kv 键数量"));
+        box.appendChild(kpiCard(me.ready === true ? "就绪" : (me.ready === false ? "未就绪" : "-"), "本副本 ready",
+          me.ready === true ? "accent-ok" : "accent-red", "check", null,
+          me.ready === true ? "可接流量" : (me.degraded_reason ? "原因:" + me.degraded_reason : "见成员表")));
+
+        // 本副本要点(前提/降级必须显式,不能"看起来就绪")
+        var bits = ["本副本角色 <b>" + esc(me.role || "-") + "</b>"];
+        if (me.skew_measured_ms != null) bits.push("实测时钟偏移 <b>" + me.skew_measured_ms + "ms</b>");
+        if (me.premises_ok === false) {
+          bits.push("前提未验证:<b>" + esc((me.premises_unverified || []).join(", ")) + "</b>(lab 放行 ≠ 已满足)");
+        }
+        if (me.lab_degraded === true) bits.push("<b>lab 降级运行中</b>");
+        if (me.log_writable === false) bits.push("<b>日志不可写</b>");
+        if (me.fsync_ok === false) bits.push("<b>fsync 失败</b>");
+        bits.push("投递 " + (me.delivered != null ? me.delivered : "-") + " · 投递失败 " +
+          (me.transport_errors != null ? me.transport_errors : "-"));
+        if (me.data_dir) bits.push("data_dir <span class='mono'>" + esc(me.data_dir) + "</span>");
+        $("#cl-local").innerHTML = bits.join(" · ");
+
+        // 成员表:复制进度一律取 leader 视角(非 leader 不维护 match/next)
+        var leaderRow = members.filter(function (m) { return m.reachable && m.role === "leader"; })[0] || null;
+        var lp = (leaderRow && leaderRow.peers) || [];
+        function nodeCell(m) {
+          var tag = m.is_self ? ' <span class="pill pill--blue" style="padding:0 7px;font-size:11px;">本副本</span>' : "";
+          return '<b class="mono">' + esc(m.id || "-") + "</b>" + tag +
+            '<div class="mono" style="font-size:11px;color:var(--faint);">kv=' + (m.kv_len != null ? m.kv_len : "-") +
+            " · 租约=" + (m.lease_count != null ? m.lease_count : "-") +
+            " · epoch=" + (m.config_epoch != null ? m.config_epoch : "-") +
+            " · snap=" + (m.snapshot_index != null ? m.snapshot_index : "-") + "</div>";
+        }
+        function replCell(m) {
+          if (!leaderRow) return '<span style="color:var(--faint);">无 leader:复制进度不可得</span>';
+          if (!m.reachable) return '<span style="color:var(--faint);">-</span>';
+          if (m.id === leaderRow.id) {
+            var self = lp.filter(function (x) { return x.is_self; })[0] || {};
+            return '<span style="color:var(--faint);">leader 自身(log_last_index=' +
+              (self.log_last_index != null ? self.log_last_index : "-") + ")</span>";
+          }
+          var p = lp.filter(function (x) { return x.id === m.id; })[0];
+          if (!p) return '<span style="color:var(--faint);">leader 视角无该成员</span>';
+          var lag = p.repl_lag;
+          var html = lag == null ? '<span style="color:var(--faint);">-</span>'
+            : lag === 0 ? '<span class="pill pill--ok" style="padding:0 7px;font-size:11px;">已追平</span>'
+              : '<span class="pill pill--amber" style="padding:0 7px;font-size:11px;">落后 ' + lag + " 条</span>";
+          return html + '<div class="mono" style="font-size:11px;color:var(--faint);">match=' +
+            (p.match_index != null ? p.match_index : "-") + " · 最近 ack " + clAgo(p.last_ack_age_ms) +
+            (p.clock_offset_ms != null ? " · 时钟偏移 " + p.clock_offset_ms + "ms" : "") + "</div>";
+        }
+        var tb = $("#cl-rows");
+        tb.innerHTML = "";
+        members.forEach(function (m) {
+          var tr = document.createElement("tr");
+          if (!m.reachable) {
+            tr.innerHTML = "<td>" + nodeCell(m) + "</td>" + '<td class="mono">' + esc(m.addr || "-") + "</td>" +
+              '<td colspan="8"><span class="pill pill--red"><i class="dot"></i>本次探测无响应</span> ' +
+              '<span style="color:var(--faint);">' + esc(m.error || "") + "</span></td>";
+            tb.appendChild(tr);
+            return;
+          }
+          var prem = m.premises_ok === true
+            ? '<span class="pill pill--ok" style="padding:0 7px;font-size:11px;">前提已验证</span>'
+            : '<span class="pill pill--amber" style="padding:0 7px;font-size:11px;">前提未验证</span>';
+          if (m.premises_ok !== true && (m.premises_unverified || []).length) {
+            prem += '<div class="mono" style="font-size:11px;color:var(--faint);">' +
+              esc(m.premises_unverified.join(", ")) + "</div>";
+          }
+          if (m.lab_degraded === true) {
+            prem += '<span class="pill pill--orange" style="padding:0 7px;font-size:11px;">lab 降级</span>';
+          }
+          var reasons = m.degraded_reasons || [];
+          var readyCell = m.ready === true
+            ? '<span class="pill pill--ok"><i class="dot"></i>就绪</span>'
+            : '<span class="pill pill--red"><i class="dot"></i>未就绪</span>' +
+              (reasons.length ? '<div class="mono" style="font-size:11px;color:var(--faint);">' +
+                esc(reasons.join(", ")) + "</div>" : "");
+          tr.innerHTML = "<td>" + nodeCell(m) + "</td>" +
+            '<td class="mono">' + esc(m.addr || "-") + "</td>" +
+            "<td>" + clPill(m.role) + "</td>" +
+            '<td class="mono">T' + (m.term != null ? m.term : "-") + "</td>" +
+            "<td>" + (m.leader ? '<span class="mono">' + esc(m.leader) + "</span>"
+              : '<span style="color:var(--faint);">无(选主中)</span>') + "</td>" +
+            '<td class="mono">' + (m.commit_index != null ? m.commit_index : "-") + " / " +
+            (m.applied_index != null ? m.applied_index : "-") + "</td>" +
+            "<td>" + replCell(m) + "</td>" +
+            "<td>" + readyCell + "</td>" +
+            "<td>" + prem + "</td>" +
+            '<td class="mono">' + clDur(m.uptime_ms) + "</td>";
+          tb.appendChild(tr);
+        });
+
+        // 租约台账:活跃的默认展示,**已过期的默认折叠**——
+        // 过期的条目只是残留(不再阻塞新授予),与活跃租约混在一起会被误读成异常(发现 15)。
+        var activeLeases = leases.filter(function (l) { return l.expired !== true; });
+        var deadLeases = leases.filter(function (l) { return l.expired === true; });
+        var shown = CL.showExpired ? leases : activeLeases;
+        var tg = $("#cl-lease-toggle");
+        if (tg) {
+          tg.hidden = deadLeases.length === 0;
+          tg.textContent = (CL.showExpired ? "隐藏" : "显示") + "已过期(" + deadLeases.length + ")";
+        }
+        $("#cl-lease-cnt").textContent = activeLeases.length + " 条活跃" +
+          (deadLeases.length ? " · " + deadLeases.length + " 条已过期(残留,不阻塞新授予)" : "");
+        $("#cl-lease-empty").style.display = activeLeases.length ? "none" : "";
+        if (!activeLeases.length) {
+          $("#cl-lease-empty").innerHTML = deadLeases.length && !CL.showExpired
+            ? "当前没有活跃的实例租约 —— 另有 <b>" + deadLeases.length +
+              "</b> 条已过期残留(点右上「显示已过期」查看;回收规则见 docs/control-plane-cluster-view.md §4)"
+            : "当前没有活跃的实例租约 —— 实例互斥只在有实例操作(创建/扩容/切换/销毁/查询写)持有期间存在。";
+        }
+        var ltb = $("#cl-lease-rows");
+        ltb.innerHTML = "";
+        shown.slice().sort(function (a, b) {
+          return (b.expire_at_ms || 0) - (a.expire_at_ms || 0);
+        }).forEach(function (l) {
+          var tr = document.createElement("tr");
+          var remCell = l.expired === true
+            ? '<span class="pill pill--gray" style="padding:0 7px;font-size:11px;" title="已过期:不再阻塞新授予;该条目会保留在状态机里(无 GC,见设计 §19 发现 15)">已过期(可被重新授予)</span>'
+            : '<span class="mono">' + clDur(l.remaining_ms) + "</span>";
+          tr.innerHTML = "<td>" + linkInst(l.instance) + "</td>" +
+            '<td class="mono">' + esc(l.holder || "-") + "</td>" +
+            '<td class="mono">T' + (l.fence_term != null ? l.fence_term : "-") + " / " +
+            (l.fence_index != null ? l.fence_index : "-") + "</td>" +
+            '<td class="mono">' + clDur(l.ttl_ms) + "</td>" +
+            "<td>" + remCell + "</td>" +
+            '<td class="mono">' + (l.renewals != null ? l.renewals : "-") + "</td>";
+          ltb.appendChild(tr);
+        });
+
+        // 读法说明(后端给出的注意事项,原样呈现)
+        var nb = $("#cl-notes");
+        nb.innerHTML = "";
+        (d.notes || []).forEach(function (n) {
+          var row = document.createElement("div");
+          row.style.cssText = "font-size:12px;color:var(--faint);padding:7px 0;border-bottom:1px dashed var(--border);line-height:1.6;";
+          row.textContent = "· " + n;
+          nb.appendChild(row);
+        });
+      }
+      async function clusterStepdown() {
+        var q = (CL.data || {}).quorum || {};
+        if (!q.leader) { toast("当前无 leader,无需让位", "err"); return; }
+        var ok = await riskDlg("主动让位:leader " + q.leader,
+          "让 <b>" + esc(q.leader) + "</b> 主动放弃 leader 身份,由 raft 重新选主。<br>" +
+          "继任者由 raft 按「<b>日志已追平优先</b>」自动选择(不允许人工指定,避免把未追平的副本推成主);" +
+          "已授予的实例租约在 TTL 内仍然有效,<b>已提交数据不丢</b>,但存在<b>秒级不可写窗口</b>。<br>" +
+          "可从任意副本发起(会自动转发给当前 leader),全程审计。",
+          "确认让位", ["stepdown"]);
+        if (!ok) return;
+        try {
+          var r = await jpost("/api/rds/cluster/stepdown");
+          toast(r.message || "已触发让位", "ok");
+        } catch (e) { toast(e.message, "err"); return; }
+        setTimeout(function () { clusterFetch(true); }, 1500);
+        setTimeout(function () { clusterFetch(true); }, 4000);
+      }
+      async function clusterResync() {
+        var d = CL.data || {};
+        var q = d.quorum || {};
+        var me = (d.members || []).filter(function (m) { return m.is_self; })[0] || {};
+        var ok = await riskDlg("重建审计投影",
+          "把 sink(元数据库)的审计投影游标置 0,leader 下一轮对账(≤5s)从共识日志<b>幂等重放</b>补齐;" +
+          "幂等标记保证重复行不会产生。<br>本动作<b>不写库、不影响共识与租约</b>,只影响审计投影的补齐进度。<br>" +
+          "仅在 <b>leader</b> 上有效:本副本角色 <b>" + esc(me.role || "?") + "</b>" +
+          (q.leader ? ",当前 leader=<b>" + esc(q.leader) + "</b>" : "") + "。",
+          "确认重建", ["resync"]);
+        if (!ok) return;
+        try {
+          var r = await jpost("/api/rds/cluster/resync-sink");
+          toast(r.message || "已重置投影游标", "ok");
+        } catch (e) { toast(e.message, "err"); return; }
+        setTimeout(function () { clusterFetch(true); }, 1200);
+      }
+      (function initClusterView() {
+        var bind = function (id, ev, fn) { var el = $("#" + id); if (el) el.addEventListener(ev, fn); };
+        bind("cl-refresh", "click", function () { clusterFetch(false); });
+        bind("cl-stepdown", "click", function () { clusterStepdown(); });
+        bind("cl-resync", "click", function () { clusterResync(); });
+        bind("cl-lease-toggle", "click", function () {
+          CL.showExpired = !CL.showExpired;
+          renderCluster();
+        });
+      })();
+
       /* ── 实例信息与基础配置:只读展示(编辑入口已下线) ── */
       function renderMetaPane(i) {
         renderMetaView(i);
@@ -9165,7 +9970,7 @@
       function renderMetaView(i) {
         var box = $("#dt-meta");
         box.innerHTML = "";
-        var itypeLab = { single: "单实例", async: "主从异步", sync: "主从同步", distributed: "分布式(TiDB/OceanBase)" }[i.itype] || "未标注";
+        var itypeLab = { single: "单实例", async: "主从异步", sync: "主从同步", distributed: "分布式(TiDB/OceanBase)", xenon: "Xenon Raft 高可用" }[i.itype] || "未标注";
         var dbaCell = i.dba ? (esc(i.dba) + (i.contact ? '<span class="sub"> · ' + esc(i.contact) + "</span>" : "")) : '—';
         var specPct = "62";
         var grid = document.createElement("div");
@@ -9759,6 +10564,19 @@
         function healthOf() {
           return i.status === "failed" ? "bad" : (i.status === "degraded" ? "lag" : "ok");
         }
+        // xenon(raft):主/从角色 = 共识 leader/follower 实况(有缓存时),否则回退登记角色
+        if (i.itype === "xenon") {
+          var nodesX = i.nodes || [];
+          var xr = XENON_RAFT[i.name] || null;
+          var leaderC = (xr && xr.leader) || ((nodesX.find(function (n) { return n.role === "master"; }) || {}).container) || "";
+          var followers = nodesX.filter(function (n) { return n.container !== leaderC; });
+          return [{
+            id: i.shard || "shard-1", range: "—", master: leaderC || "—",
+            slave: followers.length ? followers[0].container : "—",
+            slaves: followers.map(function (n) { return { name: n.container, role: raftRoleOf(xr, n.container) || "follower" }; }),
+            lag_ms: 0, storage: 0, health: healthOf(), raft: true
+          }];
+        }
         if ((i.shards || []).length) {
           return i.shards.map(function (x) {
             return {
@@ -10274,11 +11092,16 @@
           var card = document.createElement("div");
           card.className = "shard-card h-" + cls;
           card.dataset.stile = r.id;
+          // xenon(raft):主从角色行以 leader/follower 实况徽标呈现
+          var masterK = r.raft ? '<span class="k" style="color:#15803d;font-weight:700;">LEADER</span>' : '<span class="k">主</span>';
+          var masterV = (r.raft ? '<span class="v" style="color:#15803d;">' : '<span class="v">') + esc(master) +
+            (mf.bad ? ' <em class="f">' + esc(mf.txt) + "</em>" : "") + "</span>";
+          var slaveK = r.raft ? '<span class="k" style="color:#0f766e;font-weight:700;">FOLLOWER</span>' : '<span class="k">从</span>';
           card.innerHTML = '<div class="sc-h"><b>' + esc(r.id) + "</b>" +
             (dtsRow ? '<span class="sc-dts" title="DTS 占位 ' + esc(dtsRow.spec || "2C4G") + '">DTS</span>' : "") +
             '<span class="sc-health ' + cls + '">' + hTxt + "</span></div>" +
-            '<div class="sc-m"><span class="k">主</span><span class="v">' + esc(master) + (mf.bad ? ' <em class="f">' + esc(mf.txt) + "</em>" : "") + "</span></div>" +
-            '<div class="sc-m"><span class="k">从</span><span class="v">' + esc(slaveTxt) +
+            '<div class="sc-m">' + masterK + masterV + "</div>" +
+            '<div class="sc-m">' + slaveK + '<span class="v">' + esc(slaveTxt) +
             (svf ? ' <em class="f">节点故障</em>' : "") + "</span></div>" +
             '<div class="sc-range">' + esc(r.range) + "</div>";
           grid.appendChild(card);
@@ -10682,7 +11505,8 @@
               key: "itype", type: "select", label: "DB 架构类型", options: [
                 { v: "async", l: "主从异步(默认)" }, { v: "sync", l: "主从同步" },
                 { v: "single", l: "单实例" },
-                { v: "distributed", l: "分布式(TiDB/OceanBase · 需引擎,暂不可创建)" }
+                { v: "xenon", l: "Xenon Raft 高可用(需 xenon-local 镜像)" },
+                { v: "distributed", l: "分布式 OceanBase(占位 · 近期开放)" }
               ]
             },
             {
@@ -10852,9 +11676,10 @@
       function compositionParts(itype, prox, shardN) {
         var p = Math.max(1, Math.min(4, prox || 1));
         var s = Math.max(1, shardN || 1);
-        var label = { single: "单节点", async: "主从异步", sync: "主从同步", distributed: "分片集群" }[itype] || "主从异步";
+        var label = { single: "单节点", async: "主从异步", sync: "主从同步", distributed: "分片集群", xenon: "Xenon Raft 高可用" }[itype] || "主从异步";
         var seq = [];
-        if (itype === "single") seq = [["net", 1], ["master", 1], ["proxy", p]];
+        if (itype === "xenon") seq = [["net", 1], ["master", 1], ["slave", 2], ["verify", 1]];
+        else if (itype === "single") seq = [["net", 1], ["master", 1], ["proxy", p]];
         else if (itype === "distributed") seq = [["net", 1], ["proxy", p], ["shard", s], ["repl", 1], ["verify", 1]];
         else {
           // 多分片 = 每分片独立主从组(async 每分片 读从+离线从 2 从;sync 每分片 1 读从),逐分片累计
@@ -11533,7 +12358,7 @@
           var el = $("#" + id);
           v[k] = el ? !el.hidden : false;
         });
-        v.any = v.overview || v.instances || v.tasks || v.audit || v.alerts || v.users || v.detail;
+        v.any = v.overview || v.instances || v.nodes || v.cluster || v.tasks || v.audit || v.alerts || v.users || v.detail;
         return v;
       }
       async function tick(force) {
@@ -11568,6 +12393,10 @@
           if (vis.proxies) pxData = await jget("/api/rds/proxies").catch(function () { return null; });
           var alertData = null;
           if (vis.alerts) alertData = await jget("/api/rds/alerts?" + alertQuery()).catch(function () { return null; });
+          // 节点视图:复用 nodeFetch(静默模式,避免轮询失败时反复弹提示)
+          if (vis.nodes) await nodeFetch(true);
+          // 管控集群:观测页,5s 节流(成员扇出有成本,不必跟着 2.5s 跳)
+          if (vis.cluster && (!CL.at || Date.now() - CL.at > 5000)) await clusterFetch(true);
 
           if (vis.overview) {
             var anomalies = [];
@@ -11608,11 +12437,23 @@
       $$("#sidebar .nav-item").forEach(function (b) {
         b.addEventListener("click", function () {
           var page = b.dataset.view;
-          var need = { tasks: "tasks.view", audit: "audit.view", alerts: "alerts.view", proxies: "instances.view", dag: "tasks.view" }[page];
+          var need = { tasks: "tasks.view", audit: "audit.view", alerts: "alerts.view", proxies: "instances.view", nodes: "instances.view", cluster: "cluster.view", dag: "tasks.view" }[page];
           if (page === "users") need = hasPerm("users.manage") || hasPerm("roles.manage") ? "" : "users.manage/roles.manage";
           if (need && !hasPerm(need)) { toast("无权限:" + need, "err"); return; }
           setRoute("#/" + page);
         });
+      });
+      $("#btn-logout").addEventListener("click", async function () {
+        var ok = await confirmDlg("退出登录", "将撤销当前会话(集群模式下对所有副本生效)。<br>确认退出?", false);
+        if (!ok) return;
+        try {
+          var r = await jpost("/logout");
+          toast(r.message || "已登出", "ok");
+        } catch (e) {
+          // 即使服务端撤销失败,也要清掉本地 cookie 视图并回登录页(避免"以为还登录着")
+          toast("登出请求失败:" + e.message, "err");
+        }
+        setTimeout(function () { window.location.href = "/"; }, 600);
       });
       $("#btn-menu").addEventListener("click", function () {
         if (sidebar.classList.contains("open")) closeSidebar(); else openSidebar();
@@ -11641,9 +12482,85 @@
       $("#c-submit").addEventListener("click", submitCreate);
       $("#c-cancel").addEventListener("click", cancelCreate);
       (function bindCreate() {
+        // 两段式向导:第一步选架构(主入口 c-arch)→ 第二步进配置表单(c-step-form)。
+        // 一级入口是**大类**:单节点 / 高可用版 / Xenon Raft 高可用 / 分布式(占位);
+        // 高可用版的复制模式(异步 / 半同步)是它的**二级选择**(c-ha-mode),不再并列成两张卡。
+        // 隐藏的 c-itype 卡组保留为状态载体(data-itype ∈ {single,async,sync,xenon}),由本入口同步。
+        var haMode = "async";
+        function archStepLabel(v) {
+          return {
+            async: "高可用版 · 异步复制", sync: "高可用版 · 半同步复制",
+            xenon: "Xenon Raft 高可用", single: "单节点"
+          }[v] || v;
+        }
+        // 同步到隐藏 itype 卡:触发其 click 逻辑(选项区显隐 / DTS / 分片锁定都由那里统一裁决)
+        function mirrorItype(v) {
+          var m = $('#c-itype .rcard[data-itype="' + v + '"]');
+          if (m) m.click();
+        }
+        function setHint(arch) {
+          var hint = $("#c-arch-hint");
+          if (hint) hint.textContent = "已选择:" + archStepLabel(arch) + "(可点击下方「重选架构」返回本步)";
+        }
+        // 高可用版复制模式:更新分段控件 + 卡片徽标 + 状态载体
+        function setHaMode(m, silent) {
+          haMode = m === "sync" ? "sync" : "async";
+          $$("#c-ha-seg button").forEach(function (b) {
+            var on = b.dataset.ha === haMode;
+            b.classList.toggle("on", on);
+            b.setAttribute("aria-checked", on ? "true" : "false");
+          });
+          var badge = $("#c-ha-badge");
+          if (badge) badge.textContent = haMode === "sync" ? "半同步" : "异步";
+          mirrorItype(haMode);
+          if (!silent) setHint(haMode);
+        }
+        function enterForm(arch) {
+          var form = $("#c-step-form");
+          if (form) form.style.display = "";
+          setHint(arch);
+          // 滚动到表单首屏
+          try { form.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) { /* 旧浏览器忽略 */ }
+        }
+        function backToArch() {
+          var form = $("#c-step-form");
+          if (form) form.style.display = "none";
+          var hint = $("#c-arch-hint");
+          if (hint) hint.textContent = "点击选择架构,进入下一步配置";
+          try { $("#c-step-arch").scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) { /* 忽略 */ }
+        }
+        $$("#c-arch .rcard").forEach(function (c) {
+          c.addEventListener("click", function () {
+            // 占位卡(近期开放,如 OceanBase):不可选,给出明确提示而非静默失败
+            if (c.classList.contains("is-soon")) {
+              toast("该架构模板接入中,近期开放", "err");
+              return;
+            }
+            var a = c.dataset.arch;
+            if (!a) return;
+            $$("#c-arch .rcard").forEach(function (x) { x.classList.remove("on"); });
+            c.classList.add("on");
+            var haRow = $("#c-ha-mode");
+            if (a === "ha") {
+              // 高可用版:展开二级选择,并把当前复制模式落到状态载体
+              if (haRow) haRow.style.display = "";
+              setHaMode(haMode, true);
+              enterForm(haMode);
+            } else {
+              if (haRow) haRow.style.display = "none";
+              mirrorItype(a);
+              enterForm(a);
+            }
+          });
+        });
+        $$("#c-ha-seg button").forEach(function (b) {
+          b.addEventListener("click", function () { setHaMode(b.dataset.ha, false); });
+        });
+        $("#c-arch-back").addEventListener("click", backToArch);
         function bindRcard(sel, key) {
           $$(sel + " .rcard").forEach(function (c) {
             c.addEventListener("click", function () {
+              if (c.classList.contains("is-soon") || !c.dataset[key]) return;
               $$(sel + " .rcard").forEach(function (x) { x.classList.remove("on"); });
               c.classList.add("on");
               var v = c.dataset[key];
@@ -11651,9 +12568,17 @@
                 createState.itype = v;
                 var okArch = v !== "single";
                 var dtsBox = $("#c-dts");
-                if (dtsBox) { dtsBox.disabled = !okArch; if (!okArch) dtsBox.checked = false; }
+                if (dtsBox) { dtsBox.disabled = !okArch || v === "xenon"; if (!okArch || v === "xenon") dtsBox.checked = false; }
                 var spBox = $("#c-dts_spec");
-                if (spBox) spBox.disabled = !okArch;
+                if (spBox) spBox.disabled = !okArch || v === "xenon";
+                // xenon(raft):专属选项区(节点数/前置 rsproxy/一致性档位);隐藏通用 Proxy 区与分片
+                var xopts = $("#c-xenon-opts");
+                if (xopts) xopts.style.display = v === "xenon" ? "block" : "none";
+                var proxSec = $("#c-prox") && $("#c-prox").closest(".csec");
+                if (proxSec) proxSec.style.display = v === "xenon" ? "none" : "";
+                var shardRow = $("#c-shard_num") && $("#c-shard_num").closest(".csec");
+                if (v === "xenon" && shardRow) { $("#c-shard_num").value = 1; $("#c-shard_slider").value = 1; $("#c-shard_num").disabled = true; $("#c-shard_slider").disabled = true; }
+                else if (shardRow) { $("#c-shard_num").disabled = false; $("#c-shard_slider").disabled = false; }
               } else { createState.prox = v; }
               if (key === "prox") $("#c-prox-custom").hidden = v !== "custom";
             });
@@ -11729,6 +12654,8 @@
         if (!b) return;
         var inst = accessInst && accessInst.name;
         if (!inst) return;
+        bindXenonRaftZone();
+        if (accessInst && accessInst.itype === "xenon") return; // xenon:切换/回滚走 raft 面板,忽略受管操作
         if (b.dataset.af != null) {
           var v = b.dataset.af === "1" ? "1" : "0";
           jpost("/api/rds/meta?name=" + encodeURIComponent(inst) + "&k=auto_failover&v=" + v)
@@ -11768,6 +12695,7 @@
           });
         }
       });
+      bindXenonRaftZone(); // 页面级代理:处理 raft 面板内的刷新/切换按钮
       $("#mon-refresh").addEventListener("click", function () { renderMonitor(); });
       (function () {
         var ds = $("#dsub-slow");
@@ -12120,9 +13048,15 @@
         if (!/^[A-Za-z0-9_-]{2,64}$/.test(name)) { $("#c-err").textContent = "实例名必填(字母/数字/连字符,2-64 位)"; return; }
         var itype = createState.itype;
         if (itype === "distributed") { $("#c-err").textContent = "分布式需引擎模板,暂不可创建"; return; }
+        var xenonNodes = 0;
+        var shardNum = parseInt(v("c-shard_num"), 10) || 1;
+        if (itype === "xenon") {
+          xenonNodes = parseInt(v("c-xenon_nodes"), 10) || 3;
+          if (xenonNodes < 1 || xenonNodes > 9) { $("#c-err").textContent = "xenon 节点数需在 1-9"; return; }
+          if (shardNum > 1) { $("#c-err").textContent = "xenon(raft)架构不支持分片,请保持 1 分片"; return; }
+        }
         var prox = createState.prox === "custom" ? (parseInt(v("c-prox-custom"), 10) || 2) : parseInt(createState.prox, 10);
         prox = Math.max(1, Math.min(4, prox));
-        var shardNum = parseInt(v("c-shard_num"), 10) || 1;
         shardNum = Math.max(1, Math.min(128, shardNum));
         var spec = createState.spec === "自定义" ? (v("c-spec-custom-in") || "自定义") : createState.spec;
         var dataSize = v("c-data_size") ? (v("c-data_size") + "GiB") : "";
@@ -12149,7 +13083,12 @@
           var x = v(kv[1]); if (x) p.set(kv[0], x);
         });
         if ($("#c-core").checked) p.set("core", "1");
-        if (itype !== "single" && $("#c-dts").checked) {
+        if (itype === "xenon") {
+          p.set("xenon_nodes", String(xenonNodes));
+          p.set("xenon_proxy", v("c-xenon_proxy") || "0");
+          p.set("xenon_consistency", v("c-xenon_consistency") || "strong");
+        }
+        if (itype !== "single" && itype !== "xenon" && $("#c-dts").checked) {
           p.set("dts", "1");
           var dsp = (($("#c-dts_spec") || {}).value || "2C4G");
           p.set("dts_spec", dsp);
@@ -12194,6 +13133,34 @@
       var shardSigCache = { key: "" };
       // vtorc 式事实层(P1):实例 → {container: fact},供节点卡标注复制模式/半同步/复制状态
       var ORCH_F = {};
+      // xenon raft 实况缓存(实例 → {leader, nodes[], updated});12s 节流(逐节点 xenoncli exec 有成本)
+      var XENON_RAFT = {};
+      var XENON_RAFT_TS = 0;
+      async function loadXenonRaft(inst) {
+        if (!inst) return { leader: "", nodes: [] };
+        if (XENON_RAFT[inst] && Date.now() - XENON_RAFT_TS < 12000) return XENON_RAFT[inst];
+        var r = await jget("/api/rds/xenon/raft?instance=" + encodeURIComponent(inst));
+        XENON_RAFT[inst] = r || { leader: "", nodes: [] };
+        XENON_RAFT_TS = Date.now();
+        return XENON_RAFT[inst];
+      }
+      // 节点 raft 角色(按共识 leader + 本机 state 综合)
+      function raftRoleOf(xr, container) {
+        if (!xr || !xr.nodes) return "";
+        var cell = (xr.nodes || []).find(function (n) { return n.container === container; });
+        if (!cell || !cell.raft) return "";
+        var st = cell.raft.reachable === false ? "down" : String(cell.raft.state || "?");
+        if (xr.leader && container === xr.leader) return "LEADER";
+        if (st === "LEADER") return "LEADER";
+        if (st === "down") return "DOWN";
+        return st || "?";
+      }
+      function raftStateTxt(st) {
+        return { LEADER: "LEADER", FOLLOWER: "FOLLOWER", CANDIDATE: "竞选", IDLE: "IDLE", INVALID: "异常", DOWN: "DOWN" }[st] || st || "?";
+      }
+      function raftStateCol(st) {
+        return { LEADER: "#15803d", FOLLOWER: "#0f766e", CANDIDATE: "#b45309", IDLE: "#64748b", INVALID: "#b91c1c", DOWN: "#b91c1c" }[st] || "#64748b";
+      }
       async function orchLoad(inst) {
         if (!inst) return {};
         if (ORCH_F[inst] && Date.now() - (ORCH_F._ts || 0) < 8000) return ORCH_F[inst];
@@ -12206,10 +13173,11 @@
         } catch (e) { ORCH_F[inst] = {}; }
         return ORCH_F[inst];
       }
-      // 受管切换 UI:候选下拉/执行/刷新事实(仅真实运行实例且有从)
+      // 受管切换 UI:候选下拉/执行/刷新事实(仅真实运行实例且有从;xenon raft 由共识自主选主,不适用)
       function fillRpUi(i, factsMap) {
         var ui = $("#rp-ui");
         if (!ui || !i) return;
+        if (i.itype === "xenon") { ui.style.display = "none"; return; }
         var can = hasPerm("instances.manage") && i.status === "running" && i.enabled !== false && !String(i.network || "").startsWith("demo-");
         var slaves = (i.nodes || []).filter(function (n) { return n.role !== "master"; });
         if (!can || !slaves.length) { ui.style.display = "none"; return; }
@@ -12257,6 +13225,16 @@
         });
       }
       // 偏差横幅:编排事实主 ≠ 登记主 → 高亮 + 一键按事实切换
+      // xenon raft 说明横幅(分片详情顶部):自主选主、无受管切换/回滚
+      function orchXenonNote(inst) {
+        var b = document.querySelector("#shard-orch-banner");
+        if (!b || !inst) return;
+        b.style.display = "";
+        b.className = "";
+        b.style.cssText = "margin:0 0 12px;";
+        b.innerHTML = '<div style="display:flex;gap:8px;align-items:center;padding:8px 12px;border:1px solid #a5d8ff;border-radius:8px;background:#eff8ff;color:#0369a1;font-size:12px;line-height:1.6;">' +
+          svg("warn", 'style="width:16px;height:16px;flex:none;color:#0284c7;"') + "<span><b>Xenon raft 集群</b>:主库故障由 raft 共识自动完成选主切换(后台复制仍为半同步);不提供受管 PRS/ERS 切换与回滚。leader/follower 角色与手动竞选入口见实例详情的<b>拓扑结构</b>。</span></div>";
+      }
       function orchBanner(i, factsMap) {
         var b = document.querySelector("#shard-orch-banner");
         if (!b || !i) return;
@@ -12293,9 +13271,132 @@
       }
       // 拓扑页「受管切换与回滚」面板:主状态 + 进行中 + 历史(审计),切换中自动轮询刷新
       var orchZoneTimer = 0;
+      // ── xenon raft 角色面板 ──
+      // 渲染详细拓扑中的 leader/follower 角色卡;follower 提供「切换为 leader」按钮
+      // (xenon raft trytoleader:仍经共识完成切换)。面板内嵌于拓扑结构页。
+      function renderXenonRaft(i, bd, xr) {
+        if (!bd) return;
+        bd.innerHTML = "";
+        var inst = i.name;
+        var nodes = i.nodes || [];
+        var leaderC = (xr && xr.leader) || "";
+        // 请求节点与登记节点对齐渲染;真实角色优先 raft 实况
+        var html = "";
+        var any = false;
+        nodes.forEach(function (n) {
+          var st = raftRoleOf(xr, n.container);
+          if (!st) return;
+          any = true;
+          var col = raftStateCol(st);
+          var isLeader = st === "LEADER";
+          var roleTxt = raftStateTxt(st);
+          var down = st === "DOWN";
+          html += '<div class="dts-mini" style="border-color:' + col + (down ? ';background:#fef2f2' : "") + ';">' +
+            '<span class="ic" style="background:' + (isLeader ? "linear-gradient(135deg,#16a34a,#15803d)" : (down ? "linear-gradient(135deg,#ef4444,#b91c1c)" : "linear-gradient(135deg,#14b8a6,#0f766e)")) + '">' + svg("server") + "</span>" +
+            '<div class="mm"><b>' + esc(n.container) + "</b>" +
+            '<div class="ms">' + (n.rpc_host_port ? "raft RPC 127.0.0.1:" + n.rpc_host_port : (n.host || n.container) + ":8801") +
+            (xr && xr.updated ? " · 更新于 " + esc(fmtTime(xr.updated)) : "") + "</div></div>" +
+            '<span class="st" style="color:' + col + ';font-weight:700;">' + esc(roleTxt) + "</span>" +
+            (isLeader
+              ? '<span class="pill pill--blue" style="padding:0 7px;font-size:10px;align-self:center;">主写 · 半同步</span>'
+              : "") +
+            ((!isLeader && !down && hasPerm("instances.manage"))
+              ? '<button class="btn btn-ghost btn-sm" data-xenonrole="tryleader" data-node="' + esc(n.container) + '" style="margin-left:auto;" title="对该 FOLLOWER 发起 raft 竞选(xenoncli raft trytoleader);需多数派达成后生效,期间有短暂不可写">切换为 leader</button>'
+              : "") +
+            "</div>";
+        });
+        if (!any) {
+          html = '<div class="dts-mini"><span class="ic" style="background:#64748b;">' + svg("db") + "</span>" +
+            '<div class="mm"><b>暂无成员实况</b><div class="ms">未取到任何节点 raft 状态;可能容器未运行或 xenoncli 不可用</div></div></div>';
+        }
+        html += '<div class="rm" style="margin-top:10px;color:#475569;font-size:12px;line-height:1.7;">' +
+          "raft 集群的 leader/follower 由<b>共识协议自主维持</b>(主库故障自动选主,后台复制仍为半同步);" +
+          "不提供 orchestrator 受管 PRS/ERS 切换与回滚。对 FOLLOWER 点击「切换为 leader」可主动发起竞选(xenoncli raft trytoleader)," +
+          "由 raft 决定最终角色。</div>";
+        bd.innerHTML = html;
+        // 若 leader 实况与登记主不同,就地提示(raft 已切换而登记未跟随的情形)
+        var reg = (nodes.find(function (n) { return n.role === "master"; }) || {}).container;
+        if (leaderC && reg && leaderC !== reg) {
+          var tip = document.createElement("div");
+          tip.className = "rm";
+          tip.style.cssText = "color:#b45309;margin-top:6px;font-size:12px;";
+          tip.innerHTML = "共识 leader 为 <b>" + esc(leaderC) + "</b>,与登记主(" + esc(reg) + ")不一致 —— 节点写语义以 raft leader 为准。";
+          bd.appendChild(tip);
+        }
+      }
+      function xenonRaftPanel(i, zone) {
+        var inst = i.name;
+        // 同实例重绘不重建外壳(拓扑页定时轻刷新),只更新主体
+        if (zone.dataset.xrInst !== inst) {
+          zone.innerHTML = '<div class="card" style="margin-top:14px;padding:0 0 12px;">' +
+            '<div class="card-sec-hd"><h2>Xenon raft 集群 · 角色实况</h2>' +
+            '<span class="desc" style="font-size:12px;">raft 共识自主选主 · 后台复制仍为半同步 · 无受管切换与回滚</span>' +
+            (hasPerm("instances.manage") ? '<span style="margin-left:auto;"><button class="btn btn-ghost btn-sm" data-xenonrole="refresh" title="重新探测各节点 raft 状态">刷新角色</button></span>' : "") +
+            "</div>" +
+            '<div class="card-body tight" id="xenon-raft-bd"></div></div>';
+          zone.dataset.xrInst = inst;
+        }
+        var bd = $("#xenon-raft-bd");
+        if (!bd) return;
+        loadXenonRaft(inst).then(function (xr) {
+          renderXenonRaft(i, bd, xr);
+          // 角色状态变化会影响分片卡「主/从」展示 → 数据未变时也刷新卡片标注
+          try { if (accessInst && accessInst.name === inst) renderTopoShardGrid(accessInst); } catch (e) { /* 忽略 */ }
+        }).catch(function (e) {
+          bd.innerHTML = '<div class="dts-mini"><span class="ic" style="background:#64748b;">' + svg("alert") + "</span>" +
+            '<div class="mm"><b>无法获取 raft 状态</b><div class="ms">' + esc((e && e.message) || e || "未知错误") + "</div></div></div>";
+        });
+      }
+      // xenon raft 面板内按钮:刷新 / 切换为 leader
+      function bindXenonRaftZone() {
+        var zone = $("#topo-orch-zone");
+        if (!zone || zone.dataset.xenonBound) return;
+        zone.dataset.xenonBound = "1";
+        zone.addEventListener("click", function (e) {
+          var t = e.target.closest("[data-xenonrole]");
+          if (!t) return;
+          var inst = accessInst && accessInst.name;
+          if (!inst) return;
+          if (t.dataset.xenonrole === "refresh") {
+            XENON_RAFT_TS = 0;
+            loadXenonRaft(inst).then(function (xr) { renderXenonRaft(accessInst, $("#xenon-raft-bd"), xr); })
+              .catch(function (err) { toast(err.message, "err"); });
+            return;
+          }
+          if (t.dataset.xenonrole === "tryleader") {
+            var node = t.dataset.node;
+            riskDlg("切换 raft leader 到 " + node,
+              "将向 <b>" + esc(node) + "</b> 发起 raft 竞选(xenoncli raft trytoleader)。<br>" +
+              "旧 leader 将让位、进入新的选主流程,需多数派成员达成一致后切换完成;期间存在<b>短暂的不可写窗口</b>(秒级)。" +
+              "全程审计;若节点数据未追平或半同步 ack 不足,竞选会失败并保持原角色。",
+              "发起竞选", [inst]).then(async function (yes) {
+              if (!yes) return;
+              try {
+                var r = await jpost("/api/rds/xenon/raft/trytoleader?instance=" + encodeURIComponent(inst) + "&node=" + encodeURIComponent(node));
+                toast("已发起竞选:" + (r.message || "ok"), "ok");
+              } catch (err) { toast(err.message, "err"); return; }
+              // 等待选主稳定后刷新角色与卡片
+              var n = 12;
+              var iv = setInterval(function () {
+                n--;
+                if (n <= 0) clearInterval(iv);
+                if (accessInst && accessInst.name === inst) {
+                  XENON_RAFT_TS = 0;
+                  loadXenonRaft(inst).then(function (xr) {
+                    renderXenonRaft(accessInst, $("#xenon-raft-bd"), xr);
+                    try { renderTopoShardGrid(accessInst); renderShardList && renderShardList(accessInst); } catch (e2) { /* 忽略 */ }
+                  }).catch(function () { });
+                }
+              }, 5000);
+            });
+          }
+        });
+      }
+      // xenon raft 面板(替代受管切换/回滚):详细拓扑中展示 leader/follower 角色 + 角色切换按钮
       function renderTopoOrch(i) {
         var zone = $("#topo-orch-zone");
         if (!zone || !i) return;
+        if (i.itype === "xenon") { xenonRaftPanel(i, zone); return; }
         var inst = i.name;
         Promise.all([
           jget("/api/rds/orch/ops?instance=" + encodeURIComponent(inst)).catch(function () { return null; }),
@@ -12421,22 +13522,32 @@
         jget("/api/rds/instance?name=" + encodeURIComponent(inst)).then(async function (d) {
           var i = d.instance;
           accessInst = i;
-          var rows = shardRowsOf(i);
-          var row = null;
-          rows.forEach(function (r) { if (r.id === id) row = r; });
-          if (!row) row = rows[0] || null;
           // DTS 记录提前拉取 + 渲染签名守卫:内容未变不重建(消除增/删 DTS 时的轮询闪烁)
           var dtsByNode = {};
           try {
             var dtr = await jget("/api/rds/dts?instance=" + encodeURIComponent(inst));
             (dtr.dts || []).forEach(function (r) { dtsByNode[r.node] = r; });
           } catch (e) { }
+          // xenon raft:主从节点拓扑按共识角色(LEADER/FOLLOWER)渲染,先取实况再算分片行
+          var xr = null;
+          if (i.itype === "xenon") {
+            try { xr = await loadXenonRaft(inst); } catch (e) { xr = null; }
+          }
+          var rows = shardRowsOf(i);
+          var row = null;
+          rows.forEach(function (r) { if (r.id === id) row = r; });
+          if (!row) row = rows[0] || null;
           // 复制/半同步事实(vtorc 式事实层,P1)
           var factsMap = await orchLoad(inst);
           fillRpUi(i, factsMap);
-          orchBanner(i, factsMap);
-          orchHistoryNote(inst);
-          var sig = inst + "|" + id + "|" + i.status + "|" +
+          if (i.itype === "xenon") {
+            // xenon raft:无受管切换/回滚;给出说明横幅
+            orchXenonNote(inst);
+          } else {
+            orchBanner(i, factsMap);
+            orchHistoryNote(inst);
+          }
+          var sig = inst + "|" + id + "|" + i.status + "|" + JSON.stringify(xr) + "|" +
             JSON.stringify((i.nodes || []).map(function (n) { return n.container + ":" + n.role; })) + "|" +
             JSON.stringify(dtsByNode) + "|" + JSON.stringify(factsMap);
           if (shardSigCache.key === sig && box.innerHTML !== "") return;
@@ -12467,22 +13578,36 @@
             if (r === "offline" || r === "stats") return "offline";
             return "read"; // read / ""
           }
+          // xenon(raft):节点卡按共识角色渲染(LEADER/FOLLOWER/…),而非主从语义
+          var isXenonT = i.itype === "xenon";
+          function xenonPill(st) {
+            if (st === "LEADER") return '<span class="pill" style="background:#dcfce7;color:#15803d;">LEADER</span>';
+            if (st === "DOWN") return '<span class="pill" style="background:#fee2e2;color:#b91c1c;">DOWN</span>';
+            if (st === "CANDIDATE") return '<span class="pill" style="background:#fef3c7;color:#b45309;">CANDIDATE</span>';
+            return '<span class="pill" style="background:#cffafe;color:#0f766e;">' + esc(st || "FOLLOWER") + "</span>";
+          }
           function nodeHTML(container, role) {
             var n = nodeMap[container];
             var ro = roleOf(role);
             var isM = ro === "master";
+            var raftSt = isXenonT ? raftRoleOf(xr, container) : "";
+            var raftMember = isXenonT && !!raftSt;
             var sub, pill;
-            if (isM) { sub = "MySQL Master"; pill = ""; }
+            if (raftMember) {
+              sub = raftSt === "LEADER" ? "Xenon raft LEADER · 主写(半同步)" : (raftSt === "DOWN" ? "Xenon raft 节点不可达" : "Xenon raft 成员");
+              pill = xenonPill(raftSt);
+            } else if (isM) { sub = "MySQL Master"; pill = ""; }
             else if (ro === "backup") { sub = "MySQL Slave"; pill = '<span class="pill backup">备份</span>'; }
             else if (ro === "offline") { sub = "Offline Slave"; pill = '<span class="pill offline">离线</span>'; }
             else { sub = "MySQL Slave"; pill = '<span class="pill read">只读</span>'; }
+            var isLeaderShow = isM || raftSt === "LEADER";
             var ip = n ? ((n.host || "127.0.0.1") + ":" + (n.host_port || n.port || "—")) : "—";
-            var rm = orchRmHtml(factsMap[container]);
-            var cls = "sdt-card" + (isM ? " master" : "") + (ro === "offline" ? " offline" : "");
-            return '<div class="' + cls + '"><span class="ic">' + svg(isM ? "server" : "db") + "</span>" +
+            var rm = isXenonT ? "" : orchRmHtml(factsMap[container]); // xenon 无 vtorc 复制事实
+            var cls = "sdt-card" + (isLeaderShow ? " master" : "") + (ro === "offline" ? " offline" : "");
+            return '<div class="' + cls + '"><span class="ic">' + svg(isLeaderShow ? "server" : "db") + "</span>" +
               '<span class="tt"><span class="nm">' + esc(container) + "</span><div class=\"sub\">" + esc(sub) + '</div><div class="ip">' + esc(ip) + "</div>" + rm + "</span>" + pill + "</div>";
           }
-          var canDts = hasPerm("instances.manage") && accessInst.status === "running" && accessInst.enabled !== false;
+          var canDts = hasPerm("instances.manage") && accessInst.status === "running" && accessInst.enabled !== false && !isXenonT;
           function dtsPipeHTML(node, rec) {
             if (!rec) {
               if (!canDts) return "";
@@ -12513,7 +13638,8 @@
           topoBox.appendChild(mw);
           var trunk = document.createElement("div");
           trunk.className = "sdt-trunk";
-          trunk.innerHTML = '<i class="sdt-vline"></i><span class="sdt-lbl v">binlog replication</span><i class="sdt-arrow"></i>';
+          trunk.innerHTML = '<i class="sdt-vline"></i><span class="sdt-lbl v">' +
+            (isXenonT ? "raft consensus · semi-sync replication" : "binlog replication") + '</span><i class="sdt-arrow"></i>';
           topoBox.appendChild(trunk);
           var slavesWrap = document.createElement("div");
           slavesWrap.className = "sdt-slaves";
@@ -12529,6 +13655,13 @@
             slavesWrap.appendChild(col);
           });
           topoBox.appendChild(slavesWrap);
+          // 分片详情标题:raft 角色说明
+          var desc = document.querySelector("#shard-nodes-desc");
+          if (desc) {
+            desc.textContent = isXenonT
+              ? "xenon raft 集群成员 —— LEADER 为共识主写节点(后台半同步),FOLLOWER 随选举提升"
+              : "该分片的复制拓扑(主 → 从)";
+          }
           nodesBox.appendChild(topoBox);
         }).catch(function (e) {
           box.innerHTML = '<div class="empty" style="padding:16px;">加载失败:' + esc(e.message) + "</div>";
@@ -13196,6 +14329,7 @@
           if (!hasPerm("instances.create")) { err.textContent = "无 instances.create 权限"; return; }
           var p = new URLSearchParams();
           p.set("name", name); p.set("itype", dagState.itype); p.set("proxies", dagState.prox); p.set("shard_num", String(shard));
+          if (dagState.itype === "xenon") p.set("xenon_nodes", "3");
           jpost("/api/rds/create?" + p.toString()).then(function (d) { toast("创建任务已提交:" + d.task_id, "ok"); setRoute("#/tasks"); tick(true); }).catch(function (e) { err.textContent = e.message; });
           return;
         }

@@ -1,0 +1,38 @@
+[Unit]
+# rdsctl 执行面 agent(systemd 模板单元;%i = 宿主机/节点标识)
+#
+# 为什么每台宿主机都要有:设计文档 §9.1 —— cluster 模式下"本机也走 agent",
+# 取消 Local 直连本机 docker 的特权路径,这样 fence 才能在**资源边界**强制执行
+# (前提 A4)。agent 进程无状态,只持有本地 fence_seen / idem 落盘状态。
+#
+Description=rdsctl executor agent (%i)
+Documentation=file:///opt/rdsctl/docs/control-plane-ha-design.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=rdsctl
+Group=rdsctl
+SupplementaryGroups=docker
+WorkingDirectory=/opt/rdsctl
+EnvironmentFile=-/etc/rdsctl/rdsctl.env
+EnvironmentFile=-/etc/rdsctl/%i.env
+# RDSCTL_AGENT_TOKEN(与控制器共享;生产必须为强口令)、RDSCTL_AGENT_PORT(默认 9190)、
+# RDSCTL_DATA_DIR(存放 fence_seen/ 与 idem/)
+ExecStart=/opt/rdsctl/rdsctl agent --port ${RDSCTL_AGENT_PORT}
+
+Restart=always
+RestartSec=2
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=append:/var/log/rdsctl/agent-%i.log
+StandardError=append:/var/log/rdsctl/agent-%i.log
+
+[Install]
+WantedBy=multi-user.target

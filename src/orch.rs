@@ -19,6 +19,8 @@ impl ReplMode {
     pub fn of_itype(itype: &str) -> ReplMode {
         match itype.trim().to_ascii_lowercase().as_str() {
             "sync" => ReplMode::SemiSync,
+            // xenon(raft 高可用):无 MySQL 复制语义,不参与 orchestrator 复制模式决策;
+            // 映射 Async 仅作展示兜底(实际不使用——xenon 禁用 ERS/PRS)
             _ => ReplMode::Async,
         }
     }
@@ -33,10 +35,10 @@ impl ReplMode {
 /// 半同步状态(主/从两侧)
 #[derive(Debug, Clone, PartialEq)]
 pub struct SemiSync {
-    pub master_enabled: bool, // 主侧 rpl_semi_sync_master_enabled
-    pub master_ack: u64,      // 主侧 Rpl_semi_sync_master_clients 或收到 ack 数
+    pub master_enabled: bool,  // 主侧 rpl_semi_sync_master_enabled
+    pub master_ack: u64,       // 主侧 Rpl_semi_sync_master_clients 或收到 ack 数
     pub master_degraded: bool, // 主侧已退化(无 ack 保护仍继续写)
-    pub slave_enabled: bool,  // 从侧 rpl_semi_sync_slave_enabled
+    pub slave_enabled: bool,   // 从侧 rpl_semi_sync_slave_enabled
 }
 
 /// 某副本的复制事实
@@ -117,20 +119,17 @@ pub fn parse_slave_status(text: &str) -> Option<SlaveStatus> {
         return None;
     }
     // NULL → None(未知);"0" → 追平
-    let lag = text
-        .lines()
-        .map(|l| l.trim())
-        .find_map(|l| {
-            if l.to_ascii_lowercase().starts_with("seconds_behind_master:") {
-                let v = l.splitn(2, ':').nth(1).unwrap_or("").trim();
-                match v {
-                    "NULL" => None,
-                    _ => v.parse::<i64>().ok(),
-                }
-            } else {
-                None
+    let lag = text.lines().map(|l| l.trim()).find_map(|l| {
+        if l.to_ascii_lowercase().starts_with("seconds_behind_master:") {
+            let v = l.splitn(2, ':').nth(1).unwrap_or("").trim();
+            match v {
+                "NULL" => None,
+                _ => v.parse::<i64>().ok(),
             }
-        });
+        } else {
+            None
+        }
+    });
     Some(SlaveStatus {
         io_running: io,
         sql_running: sql,
@@ -213,7 +212,8 @@ mod tests {
 
     #[test]
     fn parse_slave_status_no_and_null() {
-        let txt = "Slave_IO_Running: Connecting\nSlave_SQL_Running: No\nSeconds_Behind_Master: NULL";
+        let txt =
+            "Slave_IO_Running: Connecting\nSlave_SQL_Running: No\nSeconds_Behind_Master: NULL";
         let s = parse_slave_status(txt).unwrap();
         assert!(!s.io_running);
         assert!(!s.sql_running);
@@ -234,7 +234,12 @@ mod tests {
 
     #[test]
     fn fact_health_and_ack_safe() {
-        let semisync = SemiSync { master_enabled: true, master_ack: 1, master_degraded: false, slave_enabled: true };
+        let semisync = SemiSync {
+            master_enabled: true,
+            master_ack: 1,
+            master_degraded: false,
+            slave_enabled: true,
+        };
         let f = Fact {
             container: "rds-x-s1".into(),
             role: "slave".into(),
@@ -247,17 +252,32 @@ mod tests {
         };
         assert!(f.repl_ok());
         assert!(f.ack_safe());
-        let m = Fact { role: "master".into(), alive: true, ..f.clone() };
+        let m = Fact {
+            role: "master".into(),
+            alive: true,
+            ..f.clone()
+        };
         assert!(m.repl_ok());
-        let dead = Fact { alive: false, ..f.clone() };
+        let dead = Fact {
+            alive: false,
+            ..f.clone()
+        };
         assert!(!dead.repl_ok());
     }
 
     #[test]
     fn candidate_pick_zero_loss_vs_lossy() {
         let cands = vec![
-            Candidate { name: "s-a".into(), lag_secs: 0, ack_safe: false },
-            Candidate { name: "s-b".into(), lag_secs: 5, ack_safe: true },
+            Candidate {
+                name: "s-a".into(),
+                lag_secs: 0,
+                ack_safe: false,
+            },
+            Candidate {
+                name: "s-b".into(),
+                lag_secs: 5,
+                ack_safe: true,
+            },
         ];
         // 半同步(近零丢):只从 ack_safe 中选
         assert_eq!(pick_candidate(&cands, true), Some(1));

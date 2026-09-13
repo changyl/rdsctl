@@ -261,11 +261,19 @@ P2:`migrate_instance` 工作流(编排 §4.2 状态机)、region/az 由「标签
 | 节点身份稳定 | 容器名 | 依赖 | 同名重建的前提 | 迁移后身份不变 |
 | 端口分配 | 进程级 | Host 级(§5.3) | Host 级 | 新机房 Host 级 |
 | 执行/巡检通道 | 仅本机 docker | seam 盲区提示(§5.4) | 需 agent(P2) | 需 agent(P2) |
-| 接入层 | 本机 VIP(v0) | 机器级入口缺口 | — | 机器级入口缺口 |
+| 接入层 | 本机 VIP(v0) | 机器级入口缺口 → cluster 模式补 `ingress` 角色(见下注) | — | 机器级入口缺口 → 同上 |
 | 数据复制 | GTID 复制链 | — | 追平/重建 | 全量+增量/挂链 |
 | 主从切换 | 受管 PRS/ERS/rollback(真库演练过) | — | 主节点替换用它 | 切主用它 |
 | 替换/迁移工作流 | ✗ | ✗ | P2 `replace_node` | P2 `migrate_instance` |
 | region/az | 标签 | rack/az 事实化(P2) | rack/az 事实化(P2) | 迁移后更新(P2) |
+
+> **接入层缺口的落地口径(补充)**:机内/跨机入口缺口由
+> [control-plane-ha-design.md](./control-plane-ha-design.md) §10 收敛 —— `RDSCTL_MODE=cluster`
+> 下接入层独立为 `ingress` 角色(每宿主机一个),路由绑定(`IngressBind`)与端口分配入共识日志,
+> 业务入口以**多地址清单**暴露(与本文 §7-④ 的 `ingress[]` 模型同构);入口 host 故障时由
+> controller 重新绑定至存活 host,承诺 RTO ≤5s(客户端重连),**不承诺单 VIP 无缝漂移**。
+> 同时,`RDSCTL_MODE=cluster` 要求**本机也部署 agent**(取消 `Local` 直连特权路径),
+> 这样 fence 才能在资源侧强制执行,本文 §5.4 的"管理盲区"语义(agent 不可达 → 标 `remote`)保持不变。
 
 ---
 

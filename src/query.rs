@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 use crate::auth;
 use crate::docker as dk;
-use crate::instance::{InstStatus, InstNode, RdsInstance, ROOT_PASS};
+use crate::instance::{InstNode, InstStatus, RdsInstance, ROOT_PASS};
 use crate::manager;
 
 // ─── 分类与词法护栏 ───
@@ -31,13 +31,44 @@ const READ_KW: &[&str] = &[
 const WRITE_KW: &[&str] = &["INSERT", "UPDATE", "DELETE", "REPLACE"];
 /// DDL/管理类语句:查询台不开放(专用写账号仅 DML 授权),走实例生命周期/运维通道
 const DENY_KW: &[&str] = &[
-    "ALTER", "CREATE", "DROP", "TRUNCATE", "RENAME", "GRANT", "REVOKE",
-    "LOCK", "UNLOCK", "CALL", "LOAD", "SET", "START", "STOP", "ANALYZE",
-    "OPTIMIZE", "REPAIR", "FLUSH", "KILL", "RESET", "CHANGE", "INSTALL",
-    "UNINSTALL", "USE", "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT",
+    "ALTER",
+    "CREATE",
+    "DROP",
+    "TRUNCATE",
+    "RENAME",
+    "GRANT",
+    "REVOKE",
+    "LOCK",
+    "UNLOCK",
+    "CALL",
+    "LOAD",
+    "SET",
+    "START",
+    "STOP",
+    "ANALYZE",
+    "OPTIMIZE",
+    "REPAIR",
+    "FLUSH",
+    "KILL",
+    "RESET",
+    "CHANGE",
+    "INSTALL",
+    "UNINSTALL",
+    "USE",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "SAVEPOINT",
 ];
 /// 词法级高危子串(出现在字符串外即拒绝;DB 级还有 FILE/GRANT 等权限兜底)
-const FORBIDDEN: &[&str] = &["OUTFILE", "DUMPFILE", "LOAD_FILE", "SYS_EXEC", "BENCHMARK", "SLEEP"];
+const FORBIDDEN: &[&str] = &[
+    "OUTFILE",
+    "DUMPFILE",
+    "LOAD_FILE",
+    "SYS_EXEC",
+    "BENCHMARK",
+    "SLEEP",
+];
 
 /// 默认 deny 表(前缀匹配,不区分大小写;DB 级由账号 grant 兜底)
 fn block_prefixes() -> Vec<String> {
@@ -192,7 +223,11 @@ pub fn classify_sql(sql: &str) -> Result<Classified, String> {
     let s = scan_sql(sql);
     // 多语句:顶层分号 > 1(末尾单个分号视为可容忍)
     let trailing = sql.trim_end().ends_with(';');
-    let n = if trailing { s.top_semicolons.saturating_sub(1) } else { s.top_semicolons };
+    let n = if trailing {
+        s.top_semicolons.saturating_sub(1)
+    } else {
+        s.top_semicolons
+    };
     if n > 0 {
         return Err("不支持多语句(一次仅一条 SQL)".to_string());
     }
@@ -210,9 +245,13 @@ pub fn classify_sql(sql: &str) -> Result<Classified, String> {
             return Ok(Classified { read_only: false });
         }
         if DENY_KW.contains(&kw.as_str()) {
-            return Err(format!("语句 {kw} 属 DDL/管理类,查询台不开放(请走实例生命周期或运维通道)"));
+            return Err(format!(
+                "语句 {kw} 属 DDL/管理类,查询台不开放(请走实例生命周期或运维通道)"
+            ));
         }
-        return Err(format!("首词 {kw} 不在允许范围(只读需 SELECT/SHOW/EXPLAIN/DESCRIBE 等)"));
+        return Err(format!(
+            "首词 {kw} 不在允许范围(只读需 SELECT/SHOW/EXPLAIN/DESCRIBE 等)"
+        ));
     }
     Err("无法识别语句首词,已拒绝(注释/特殊开头)".to_string())
 }
@@ -222,14 +261,18 @@ pub fn classify_sql(sql: &str) -> Result<Classified, String> {
 pub fn blocked_table(sql: &str) -> Option<String> {
     let s = scan_sql(sql).skeleton_lower;
     let bp = block_prefixes();
-    for pat in ["from ", "join ", "into ", "update ", "table ", "alter ", "drop "] {
+    for pat in [
+        "from ", "join ", "into ", "update ", "table ", "alter ", "drop ",
+    ] {
         let mut rest = s.as_str();
         while let Some(pos) = rest.find(pat) {
             let start = pos + pat.len();
             let tail = &rest[start..];
             let ident: String = tail
                 .chars()
-                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '.' || *ch == '`')
+                .take_while(|ch| {
+                    ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '.' || *ch == '`'
+                })
                 .collect();
             let ident = ident.replace('`', "");
             for p in &bp {
@@ -413,7 +456,11 @@ pub fn parse_table(out: &str, cap_rows: usize, cap_bytes: usize) -> ParsedTable 
         let fields: Vec<&str> = line.split('\t').collect();
         let mut row: Vec<Value> = Vec::with_capacity(fields.len());
         for f in fields {
-            let raw = if f == "NULL" { None } else { Some(unescape_field(f)) };
+            let raw = if f == "NULL" {
+                None
+            } else {
+                Some(unescape_field(f))
+            };
             let v = match raw {
                 None => Value::Null,
                 Some(s) => Value::String(s),
@@ -442,7 +489,9 @@ const ACCT_RO: &str = "rds_ro";
 const ACCT_RW: &str = "rds_rw";
 
 fn ident_ok(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
 fn redact(s: &str) -> String {
@@ -460,7 +509,10 @@ fn redact(s: &str) -> String {
 /// 返回 (container, 是否写节点)。
 fn resolve_node(inst: &RdsInstance, node: &str) -> Result<(String, bool), String> {
     let find = |pred: &dyn Fn(&InstNode) -> bool| -> Option<String> {
-        inst.nodes.iter().find(|n| pred(n)).map(|n| n.container.clone())
+        inst.nodes
+            .iter()
+            .find(|n| pred(n))
+            .map(|n| n.container.clone())
     };
     let node = node.to_lowercase();
     match node.as_str() {
@@ -486,10 +538,7 @@ async fn provision(container: &str, secret: &str, write: bool) -> Result<(), Str
     let mut sql = String::new();
     for (acct, extra_grants) in [
         (ACCT_RO, ""),
-        (
-            ACCT_RW,
-            if write { "INSERT, UPDATE, DELETE" } else { "" },
-        ),
+        (ACCT_RW, if write { "INSERT, UPDATE, DELETE" } else { "" }),
     ] {
         sql.push_str(&format!(
             "CREATE USER IF NOT EXISTS '{acct}'@'%' IDENTIFIED BY '{secret}'; \
@@ -505,9 +554,7 @@ async fn provision(container: &str, secret: &str, write: bool) -> Result<(), Str
             if !ident_ok(db) {
                 return Err(format!("业务库名非法: {db}"));
             }
-            sql.push_str(&format!(
-                "GRANT {privs} ON `{db}`.* TO '{acct}'@'%'; "
-            ));
+            sql.push_str(&format!("GRANT {privs} ON `{db}`.* TO '{acct}'@'%'; "));
         }
     }
     sql.push_str("FLUSH PRIVILEGES;");
@@ -525,7 +572,9 @@ pub async fn run_query(
 ) -> Result<serde_json::Value, QueryFail> {
     // 默认库:优先用户指定(db),否则取首个业务库;解决 -D 缺失导致的 "No database selected"
     let use_db = if !db.is_empty()
-        && db.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+        && db
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
     {
         db.to_string()
     } else {
@@ -540,7 +589,11 @@ pub async fn run_query(
     if inst.status != InstStatus::Running {
         return Err(QueryFail::new(
             400,
-            format!("实例 {} 当前状态 {},仅运行中可查询", instance_name, inst.status.label()),
+            format!(
+                "实例 {} 当前状态 {},仅运行中可查询",
+                instance_name,
+                inst.status.label()
+            ),
         ));
     }
     let (container, is_write_node) = resolve_node(&inst, node_param).map_err(QueryFail::new_400)?;
@@ -569,40 +622,54 @@ pub async fn run_query(
     let (user, pass) = if allow_root_fallback() {
         ("root".to_string(), ROOT_PASS.to_string())
     } else {
-        let secret = manager().ensure_query_secret(instance_name).map_err(QueryFail::new_500)?;
-        provision(&container, &secret, !c.read_only).await.map_err(|e| {
-            QueryFail::new(
-                500,
-                format!("查询账号准备失败(已拒绝执行,不回退 root): {}", redact(&e)),
-            )
-        })?;
+        let secret = manager()
+            .ensure_query_secret(instance_name)
+            .map_err(QueryFail::new_500)?;
+        provision(&container, &secret, !c.read_only)
+            .await
+            .map_err(|e| {
+                QueryFail::new(
+                    500,
+                    format!("查询账号准备失败(已拒绝执行,不回退 root): {}", redact(&e)),
+                )
+            })?;
         (
-            if c.read_only { ACCT_RO.to_string() } else { ACCT_RW.to_string() },
+            if c.read_only {
+                ACCT_RO.to_string()
+            } else {
+                ACCT_RW.to_string()
+            },
             secret,
         )
     };
 
     // 4) 并发配额(立即失败而非排队,避免请求堆积打爆容器)
-    let _permit = sem().clone().try_acquire_owned().map_err(|_| {
-        QueryFail::new(429, "查询并发已达上限,请稍后重试".to_string())
-    })?;
+    let _permit = sem()
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| QueryFail::new(429, "查询并发已达上限,请稍后重试".to_string()))?;
 
     // 5) 执行 + 解析(计时;超时由 query_table 内部处理)
     let t0 = std::time::Instant::now();
     let out = dk::query_table(&container, &user, &pass, sql, timeout_secs(), &use_db).await;
     let elapsed_ms = t0.elapsed().as_millis() as u64;
 
-    let (columns, rows, truncated, ok, err_summary): (Vec<String>, Vec<Vec<Value>>, bool, bool, String) =
-        match out {
-            Ok(o) => {
-                let p = parse_table(&o, max_rows(), max_bytes());
-                (p.columns, p.rows, p.truncated, true, String::new())
-            }
-            Err(e) => {
-                // 超时/执行错误:记空结果 + ok=false,err_summary 保留(状态码按文本判定)
-                (Vec::new(), Vec::new(), false, false, redact(&e))
-            }
-        };
+    let (columns, rows, truncated, ok, err_summary): (
+        Vec<String>,
+        Vec<Vec<Value>>,
+        bool,
+        bool,
+        String,
+    ) = match out {
+        Ok(o) => {
+            let p = parse_table(&o, max_rows(), max_bytes());
+            (p.columns, p.rows, p.truncated, true, String::new())
+        }
+        Err(e) => {
+            // 超时/执行错误:记空结果 + ok=false,err_summary 保留(状态码按文本判定)
+            (Vec::new(), Vec::new(), false, false, redact(&e))
+        }
+    };
     let rows_returned = rows.len();
     // 掩码在后端统一实施
     let masked_cols: Vec<String> = columns
@@ -633,7 +700,11 @@ pub async fn run_query(
     let sql_hash = crate::sha256::to_hex(&crate::sha256::digest(sql.as_bytes()));
     let user = auth::current_user();
     let node_name = node_param.to_lowercase();
-    let node_label = if node_name.is_empty() { "master".to_string() } else { node_name.clone() };
+    let node_label = if node_name.is_empty() {
+        "master".to_string()
+    } else {
+        node_name.clone()
+    };
     manager().store.query_audit_insert(
         &user,
         instance_name,
@@ -656,28 +727,54 @@ pub async fn run_query(
         },
         200,
     );
-    manager().store.audit(&user, instance_name, "query_sql", &summary, if ok { "ok" } else { "fail" }, "");
+    manager().store.audit(
+        &user,
+        instance_name,
+        "query_sql",
+        &summary,
+        if ok { "ok" } else { "fail" },
+        "",
+    );
 
     if !ok {
         let msg = err_summary;
-        let status = if msg.contains("查询超时") { 408 } else { 400 };
+        let status = if msg.contains("查询超时") {
+            408
+        } else {
+            400
+        };
         return Err(QueryFail::new(status, msg));
     }
 
     // 结果列类型(工作台表头小字;仅只读且列名可解析时尽力而为,失败忽略)
     let mut column_types = serde_json::Map::new();
     if c.read_only && !columns.is_empty() && columns.len() <= 64 {
-        let in_list = columns.iter().map(|s| sql_str(s)).collect::<Vec<_>>().join(",");
+        let in_list = columns
+            .iter()
+            .map(|s| sql_str(s))
+            .collect::<Vec<_>>()
+            .join(",");
         let sql_ct = format!(
             "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA={} AND COLUMN_NAME IN ({})",
             sql_str(&use_db),
             in_list
         );
-        if let Ok(out) = dk::query_table(&container, &user, &pass, &sql_ct, timeout_secs().min(20), "").await {
+        if let Ok(out) = dk::query_table(
+            &container,
+            &user,
+            &pass,
+            &sql_ct,
+            timeout_secs().min(20),
+            "",
+        )
+        .await
+        {
             let p = parse_table(&out, 200, 512 * 1024);
             let cc: Vec<String> = p.columns.iter().map(|x| x.to_lowercase()).collect();
-            if let (Some(i_n), Some(i_t)) = (col_index(&cc, "column_name"), col_index(&cc, "data_type")) {
+            if let (Some(i_n), Some(i_t)) =
+                (col_index(&cc, "column_name"), col_index(&cc, "data_type"))
+            {
                 for r in &p.rows {
                     column_types.insert(val_cell(&r[i_n]), serde_json::json!(val_cell(&r[i_t])));
                 }
@@ -709,7 +806,11 @@ fn cells(parsed: &ParsedTable, idx: &[usize]) -> Vec<Vec<String>> {
         .rows
         .iter()
         // 越界保护:畸形 TSV 行(注释换行/截断)不 panic,缺列补空串——避免连接被中断致前端 Failed to fetch
-        .map(|r| idx.iter().map(|i| r.get(*i).map(val_cell).unwrap_or_default()).collect())
+        .map(|r| {
+            idx.iter()
+                .map(|i| r.get(*i).map(val_cell).unwrap_or_default())
+                .collect()
+        })
         .collect()
 }
 
@@ -740,11 +841,17 @@ pub async fn schema(
     if inst.status != InstStatus::Running {
         return Err(QueryFail::new(
             400,
-            format!("实例 {} 当前状态 {},仅运行中可查看 schema", instance_name, inst.status.label()),
+            format!(
+                "实例 {} 当前状态 {},仅运行中可查看 schema",
+                instance_name,
+                inst.status.label()
+            ),
         ));
     }
     let (container, _) = resolve_node(&inst, "master").map_err(QueryFail::new_400)?;
-    let secret = manager().ensure_query_secret(instance_name).map_err(QueryFail::new_500)?;
+    let secret = manager()
+        .ensure_query_secret(instance_name)
+        .map_err(QueryFail::new_500)?;
     // 元数据浏览只读;发现账号未供给则供给(与查询一致)
     let _ = provision(&container, &secret, false).await.map_err(|e| {
         QueryFail::new(500, format!("查询账号准备失败(已拒绝执行): {}", redact(&e)))
@@ -766,7 +873,8 @@ pub async fn schema(
               WHERE t.TABLE_SCHEMA = s.SCHEMA_NAME) AS object_count \
              FROM information_schema.SCHEMATA s \
              WHERE s.SCHEMA_NAME NOT IN ('mysql','performance_schema','information_schema','sys') \
-             ORDER BY s.SCHEMA_NAME".to_string(),
+             ORDER BY s.SCHEMA_NAME"
+                .to_string(),
         )
     } else if !db.is_empty() && table.is_empty() {
         (
@@ -798,7 +906,14 @@ pub async fn schema(
     let cols: Vec<String> = parsed.columns.iter().map(|s| s.to_lowercase()).collect();
 
     let actor = auth::current_user();
-    manager().store.audit(&actor, instance_name, "schema_view", &format!("{db}/{table}"), "ok", "");
+    manager().store.audit(
+        &actor,
+        instance_name,
+        "schema_view",
+        &format!("{db}/{table}"),
+        "ok",
+        "",
+    );
 
     let mut v = serde_json::json!({
         "ok": true,
@@ -811,7 +926,10 @@ pub async fn schema(
     });
     match scope {
         "libs" => {
-            if let (Some(i_n), Some(i_c)) = (col_index(&cols, "schema_name"), col_index(&cols, "object_count")) {
+            if let (Some(i_n), Some(i_c)) = (
+                col_index(&cols, "schema_name"),
+                col_index(&cols, "object_count"),
+            ) {
                 v["libs"] = serde_json::json!(cells(&parsed, &[i_n, i_c])
                     .into_iter()
                     .map(|r| serde_json::json!({
@@ -822,10 +940,17 @@ pub async fn schema(
             }
         }
         "tables" => {
-            let idx: Vec<usize> = ["table_name", "table_rows", "table_type", "engine", "table_collation", "table_comment"]
-                .iter()
-                .filter_map(|n| col_index(&cols, n))
-                .collect();
+            let idx: Vec<usize> = [
+                "table_name",
+                "table_rows",
+                "table_type",
+                "engine",
+                "table_collation",
+                "table_comment",
+            ]
+            .iter()
+            .filter_map(|n| col_index(&cols, n))
+            .collect();
             if idx.len() == 6 {
                 v["tables"] = serde_json::json!(cells(&parsed, &idx)
                     .into_iter()
@@ -841,29 +966,51 @@ pub async fn schema(
             }
         }
         "columns" => {
-            let wanted = ["column_name", "data_type", "is_nullable", "column_key", "column_default", "column_comment", "extra"];
+            let wanted = [
+                "column_name",
+                "data_type",
+                "is_nullable",
+                "column_key",
+                "column_default",
+                "column_comment",
+                "extra",
+            ];
             let idx: Vec<usize> = wanted.iter().filter_map(|n| col_index(&cols, n)).collect();
             let rows = cells(&parsed, &idx);
-            let defs: Vec<String> = rows.iter().map(|r| {
-                let mut line = format!("  `{}` {}", r[0], r[1]);
-                if let Some(nn) = r.get(2) {
-                    if nn.eq_ignore_ascii_case("NO") { line.push_str(" NOT NULL"); }
-                }
-                if let Some(d) = r.get(4) {
-                    if !d.is_empty() && !d.eq_ignore_ascii_case("NULL") {
-                        line.push_str(&format!(" DEFAULT {}", if r[1].contains("int") { d.clone() } else { sql_str(d) }));
+            let defs: Vec<String> = rows
+                .iter()
+                .map(|r| {
+                    let mut line = format!("  `{}` {}", r[0], r[1]);
+                    if let Some(nn) = r.get(2) {
+                        if nn.eq_ignore_ascii_case("NO") {
+                            line.push_str(" NOT NULL");
+                        }
                     }
-                }
-                if let Some(k) = r.get(3) {
-                    if !k.is_empty() && k != "MUL" {
-                        line.push_str(&format!(" {k}")); // 精确 PRIMARY/UNIQUE
+                    if let Some(d) = r.get(4) {
+                        if !d.is_empty() && !d.eq_ignore_ascii_case("NULL") {
+                            line.push_str(&format!(
+                                " DEFAULT {}",
+                                if r[1].contains("int") {
+                                    d.clone()
+                                } else {
+                                    sql_str(d)
+                                }
+                            ));
+                        }
                     }
-                }
-                if let Some(c) = r.get(5) {
-                    if !c.is_empty() { line.push_str(&format!(" COMMENT {}", sql_str(c))); }
-                }
-                line
-            }).collect();
+                    if let Some(k) = r.get(3) {
+                        if !k.is_empty() && k != "MUL" {
+                            line.push_str(&format!(" {k}")); // 精确 PRIMARY/UNIQUE
+                        }
+                    }
+                    if let Some(c) = r.get(5) {
+                        if !c.is_empty() {
+                            line.push_str(&format!(" COMMENT {}", sql_str(c)));
+                        }
+                    }
+                    line
+                })
+                .collect();
             let ddl = if rows.is_empty() {
                 String::new()
             } else {
@@ -917,11 +1064,17 @@ pub async fn index(
     if inst.status != InstStatus::Running {
         return Err(QueryFail::new(
             400,
-            format!("实例 {} 当前状态 {},仅运行中可查看索引", instance_name, inst.status.label()),
+            format!(
+                "实例 {} 当前状态 {},仅运行中可查看索引",
+                instance_name,
+                inst.status.label()
+            ),
         ));
     }
     let (container, _) = resolve_node(&inst, "master").map_err(QueryFail::new_400)?;
-    let secret = manager().ensure_query_secret(instance_name).map_err(QueryFail::new_500)?;
+    let secret = manager()
+        .ensure_query_secret(instance_name)
+        .map_err(QueryFail::new_500)?;
     let _ = provision(&container, &secret, false)
         .await
         .map_err(|e| QueryFail::new(500, format!("查询账号准备失败: {}", redact(&e))))?;
@@ -936,7 +1089,14 @@ pub async fn index(
         .map_err(|e| QueryFail::new(400, redact(&e).chars().take(400).collect::<String>()))?;
     let parsed = parse_table(&out, 500, 512 * 1024);
     let cols: Vec<String> = parsed.columns.iter().map(|s| s.to_lowercase()).collect();
-    let wanted = ["key_name", "non_unique", "seq_in_index", "column_name", "index_type", "collation"];
+    let wanted = [
+        "key_name",
+        "non_unique",
+        "seq_in_index",
+        "column_name",
+        "index_type",
+        "collation",
+    ];
     let idx: Vec<usize> = wanted.iter().filter_map(|n| col_index(&cols, n)).collect();
     let rows = cells(&parsed, &idx);
     let list: Vec<serde_json::Value> = rows
@@ -951,25 +1111,54 @@ pub async fn index(
             })
         })
         .collect();
-    manager().store.audit(&auth::current_user(), instance_name, "index_view", &format!("{db}.{table}"), "ok", "");
-    Ok(serde_json::json!({ "ok": true, "instance": instance_name, "db": db, "table": table, "indexes": list }))
+    manager().store.audit(
+        &auth::current_user(),
+        instance_name,
+        "index_view",
+        &format!("{db}.{table}"),
+        "ok",
+        "",
+    );
+    Ok(
+        serde_json::json!({ "ok": true, "instance": instance_name, "db": db, "table": table, "indexes": list }),
+    )
 }
 
 /// 例程列表(information_schema.ROUTINES;对象树「函数」分组)
 pub async fn routines(instance_name: &str, db: &str) -> Result<serde_json::Value, QueryFail> {
     if db.is_empty() || db.chars().any(|c| c == '`' || c.is_whitespace()) {
-        return Err(QueryFail::new(400, "需 db 且标识符不含反引号/空白".to_string()));
+        return Err(QueryFail::new(
+            400,
+            "需 db 且标识符不含反引号/空白".to_string(),
+        ));
     }
-    let inst = manager().instances.get(instance_name).map(|e| e.value().clone())
+    let inst = manager()
+        .instances
+        .get(instance_name)
+        .map(|e| e.value().clone())
         .ok_or_else(|| QueryFail::new(404, format!("实例 {instance_name} 不存在")))?;
     if inst.status != InstStatus::Running {
-        return Err(QueryFail::new(400, format!("实例 {} 当前状态 {},仅运行中可查看函数", instance_name, inst.status.label())));
+        return Err(QueryFail::new(
+            400,
+            format!(
+                "实例 {} 当前状态 {},仅运行中可查看函数",
+                instance_name,
+                inst.status.label()
+            ),
+        ));
     }
     let (container, _) = resolve_node(&inst, "master").map_err(QueryFail::new_400)?;
-    let secret = manager().ensure_query_secret(instance_name).map_err(QueryFail::new_500)?;
-    let _ = provision(&container, &secret, false).await
+    let secret = manager()
+        .ensure_query_secret(instance_name)
+        .map_err(QueryFail::new_500)?;
+    let _ = provision(&container, &secret, false)
+        .await
         .map_err(|e| QueryFail::new(500, format!("查询账号准备失败: {}", redact(&e))))?;
-    let (user, pass) = if allow_root_fallback() { ("root".to_string(), ROOT_PASS.to_string()) } else { (ACCT_RO.to_string(), secret) };
+    let (user, pass) = if allow_root_fallback() {
+        ("root".to_string(), ROOT_PASS.to_string())
+    } else {
+        (ACCT_RO.to_string(), secret)
+    };
     let sql = format!(
         "SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.ROUTINES \
          WHERE ROUTINE_SCHEMA={} ORDER BY ROUTINE_NAME",
@@ -980,14 +1169,24 @@ pub async fn routines(instance_name: &str, db: &str) -> Result<serde_json::Value
         .map_err(|e| QueryFail::new(400, redact(&e).chars().take(400).collect::<String>()))?;
     let parsed = parse_table(&out, 500, 512 * 1024);
     let cols: Vec<String> = parsed.columns.iter().map(|s| s.to_lowercase()).collect();
-    let (Some(i_n), Some(i_t)) = (col_index(&cols, "routine_name"), col_index(&cols, "routine_type")) else {
+    let (Some(i_n), Some(i_t)) = (
+        col_index(&cols, "routine_name"),
+        col_index(&cols, "routine_type"),
+    ) else {
         return Ok(serde_json::json!({ "ok": true, "db": db, "routines": [] }));
     };
     let list: Vec<serde_json::Value> = cells(&parsed, &[i_n, i_t])
         .into_iter()
         .map(|r| serde_json::json!({ "name": r[0], "type": r[1] }))
         .collect();
-    manager().store.audit(&auth::current_user(), instance_name, "routines_view", db, "ok", "");
+    manager().store.audit(
+        &auth::current_user(),
+        instance_name,
+        "routines_view",
+        db,
+        "ok",
+        "",
+    );
     Ok(serde_json::json!({ "ok": true, "db": db, "routines": list }))
 }
 
@@ -1022,7 +1221,10 @@ pub fn caps_view(instance_name: &str) -> Value {
         Some(e) => {
             let i = e.value();
             let mut v = vec!["master".to_string()];
-            if i.nodes.iter().any(|n| n.role == crate::instance::Role::Read) {
+            if i.nodes
+                .iter()
+                .any(|n| n.role == crate::instance::Role::Read)
+            {
                 v.push("read".to_string());
             }
             if i.nodes.iter().any(|n| n.role.is_offline()) {
@@ -1055,7 +1257,11 @@ mod tests {
     #[test]
     fn classify_reads_writes_and_denies() {
         assert!(classify_sql("SELECT * FROM t").unwrap().read_only);
-        assert!(classify_sql("with x as (select 1) select * from x").unwrap().read_only);
+        assert!(
+            classify_sql("with x as (select 1) select * from x")
+                .unwrap()
+                .read_only
+        );
         assert!(classify_sql("SHOW TABLES").unwrap().read_only);
         assert!(classify_sql("EXPLAIN SELECT 1").unwrap().read_only);
         assert!(classify_sql("DESCRIBE t").unwrap().read_only);
@@ -1066,8 +1272,14 @@ mod tests {
         assert!(classify_sql("SET autocommit=0").is_err(), "SET 应拒绝");
         assert!(classify_sql("SELECT 1; SELECT 2").is_err(), "多语句应拒绝");
         assert!(classify_sql("SELECT 1;").is_ok(), "末尾单分号容忍");
-        assert!(classify_sql("/* c */ SELECT 1").unwrap().read_only, "注释头");
-        assert!(classify_sql("-- hi\nSELECT 1").unwrap().read_only, "行注释头");
+        assert!(
+            classify_sql("/* c */ SELECT 1").unwrap().read_only,
+            "注释头"
+        );
+        assert!(
+            classify_sql("-- hi\nSELECT 1").unwrap().read_only,
+            "行注释头"
+        );
         assert!(classify_sql("DELETE FROM t WHERE a='x'").is_ok());
     }
 
@@ -1075,7 +1287,10 @@ mod tests {
     fn classify_forbidden_and_multi_via_strings() {
         // 字符串内的分号/关键词不触发
         assert!(classify_sql("SELECT 'a;b' FROM t").is_ok());
-        assert!(classify_sql("SELECT 'SLEEP(1)'").is_ok(), "字符串内 SLEEP 不拒绝");
+        assert!(
+            classify_sql("SELECT 'SLEEP(1)'").is_ok(),
+            "字符串内 SLEEP 不拒绝"
+        );
         // 多语句在引号外的分号
         assert!(classify_sql("SELECT 1 FROM t WHERE a=';';SELECT 2").is_err());
         // OUTFILE 拒绝
@@ -1086,7 +1301,10 @@ mod tests {
     fn blocked_tables_prefix() {
         assert!(blocked_table("SELECT * FROM mysql.user").is_some());
         assert!(blocked_table("UPDATE mysql.user SET x=1").is_some());
-        assert!(blocked_table("SELECT * FROM performance_schema.events_statements_summary_by_digest").is_some());
+        assert!(blocked_table(
+            "SELECT * FROM performance_schema.events_statements_summary_by_digest"
+        )
+        .is_some());
         assert!(blocked_table("SELECT * FROM appdb.users").is_none());
     }
 

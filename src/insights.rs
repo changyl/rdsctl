@@ -355,7 +355,12 @@ pub fn timeline(alerts: &[Value], evidence: &[Value], audit: &[Value]) -> Vec<Va
 
 /// 组装报告。audit_rows = store.audit_since(period_since, 上限) 原始行;
 /// insts = 全部实例快照(内部按状态过滤统计)。
-pub fn compose_report(period: &str, now: u64, audit_rows: &[Value], insts: &[RdsInstance]) -> Option<Value> {
+pub fn compose_report(
+    period: &str,
+    now: u64,
+    audit_rows: &[Value],
+    insts: &[RdsInstance],
+) -> Option<Value> {
     let since = period_since(period, now)?;
     // 动作计数
     let mut by_action: Vec<(String, usize)> = Vec::new();
@@ -401,7 +406,10 @@ pub fn compose_report(period: &str, now: u64, audit_rows: &[Value], insts: &[Rds
         "= rdsctl 运维{}报告(生成于 ts={now},统计窗口 since={since})",
         if period == "today" { "日" } else { "周" }
     ));
-    lines.push(format!("实例:共 {total} 台,异常(degraded/failed){} 台", bad.len()));
+    lines.push(format!(
+        "实例:共 {total} 台,异常(degraded/failed){} 台",
+        bad.len()
+    ));
     lines.push(format!(
         "审计动作计数:共 {total_ops} 条(degrade {degrade} / recover {recover});{}",
         by_action
@@ -462,7 +470,7 @@ pub fn compose_report(period: &str, now: u64, audit_rows: &[Value], insts: &[Rds
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instance::{InstStatus, InstNode, Role};
+    use crate::instance::{InstNode, InstStatus, Role};
 
     fn fake(name: &str, status: InstStatus, last_error: &str) -> RdsInstance {
         RdsInstance {
@@ -503,6 +511,7 @@ mod tests {
                 az: String::new(),
                 shard: String::new(),
                 parent: String::new(),
+                rpc_host_port: 0,
             }],
             proxy_container: format!("rds-{name}-proxy"),
             proxy_mysql_port: 35002,
@@ -575,16 +584,18 @@ mod tests {
         assert_eq!(clusters[0]["count"], 3);
         assert_eq!(clusters[0]["label"], "代理容器缺失");
         assert_eq!(clusters[0]["members"].as_array().unwrap().len(), 3);
-        assert!(
-            clusters[0]["suggested_playbooks"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|p| p["id"] == "restart_proxy")
-        );
+        assert!(clusters[0]["suggested_playbooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == "restart_proxy"));
         // 单台异常各自成组
-        assert!(clusters.iter().any(|c| c["count"] == 1 && c["label"] == "任务失败"));
-        assert!(clusters.iter().any(|c| c["count"] == 1 && c["label"] == "复制中断"));
+        assert!(clusters
+            .iter()
+            .any(|c| c["count"] == 1 && c["label"] == "任务失败"));
+        assert!(clusters
+            .iter()
+            .any(|c| c["count"] == 1 && c["label"] == "复制中断"));
     }
 
     #[test]
@@ -638,13 +649,27 @@ mod tests {
 
     #[test]
     fn alert_groups_cluster_same_cause_and_keep_severity() {
-        let alert = |id: u64, inst: &str, kind: &str, sev: &str, msg: &str| json!({
-            "id": id, "ts": 100, "instance": inst, "kind": kind, "severity": sev,
-            "message": msg, "status": "open",
-        });
+        let alert = |id: u64, inst: &str, kind: &str, sev: &str, msg: &str| {
+            json!({
+                "id": id, "ts": 100, "instance": inst, "kind": kind, "severity": sev,
+                "message": msg, "status": "open",
+            })
+        };
         let rows = vec![
-            alert(1, "a1", "degraded", "warn", "容器 rds-a1-master-1 缺失;代理不可达"),
-            alert(2, "a2", "degraded", "critical", "容器 rds-a2-master-1 缺失;代理不可达"),
+            alert(
+                1,
+                "a1",
+                "degraded",
+                "warn",
+                "容器 rds-a1-master-1 缺失;代理不可达",
+            ),
+            alert(
+                2,
+                "a2",
+                "degraded",
+                "critical",
+                "容器 rds-a2-master-1 缺失;代理不可达",
+            ),
             alert(3, "b1", "task_failed", "info", "任务 12 失败"),
         ];
         let groups = group_alerts(&rows);
@@ -653,7 +678,11 @@ mod tests {
         assert_eq!(g["count"], 2, "同类同因归 1 群(实例名/编号归一)");
         assert_eq!(g["severity"], "critical", "群严重度取成员最高");
         assert_eq!(g["members"].as_array().unwrap().len(), 2);
-        assert!(g["suggested_playbooks"].as_array().unwrap().iter().any(|p| p["id"] == "restart_proxy"));
+        assert!(g["suggested_playbooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == "restart_proxy"));
         let single = groups.iter().find(|g| g["kind"] == "task_failed").unwrap();
         assert_eq!(single["count"], 1);
     }
@@ -670,8 +699,11 @@ mod tests {
 
     #[test]
     fn timeline_merges_sorts_and_caps() {
-        let alerts = vec![json!({"ts": 300, "id": 1, "kind": "degraded", "message": "代理不可达", "severity": "warn", "status": "open"})];
-        let evidence = vec![json!({"ts": 200, "kind": "degrade", "reason": "容器 rds-a-master-1 缺失"})];
+        let alerts = vec![
+            json!({"ts": 300, "id": 1, "kind": "degraded", "message": "代理不可达", "severity": "warn", "status": "open"}),
+        ];
+        let evidence =
+            vec![json!({"ts": 200, "kind": "degrade", "reason": "容器 rds-a-master-1 缺失"})];
         let audit = vec![
             json!({"ts": 400, "action": "recover", "result": "ok", "user": "sweeper"}),
             json!({"ts": 100, "action": "create", "result": "ok", "user": "admin"}),

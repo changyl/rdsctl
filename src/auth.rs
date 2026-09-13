@@ -41,11 +41,9 @@ pub fn current_user() -> String {
 impl Actor {
     /// 当前会话信息(/api/auth/me)
     pub fn snapshot_json() -> String {
-        let (user, perms) = ACTOR.with(|a| {
-            match a.borrow().as_ref() {
-                Some(x) => (x.user.clone(), x.perms.clone()),
-                None => (String::new(), Vec::new()),
-            }
+        let (user, perms) = ACTOR.with(|a| match a.borrow().as_ref() {
+            Some(x) => (x.user.clone(), x.perms.clone()),
+            None => (String::new(), Vec::new()),
         });
         json!({ "user": user, "perms": perms }).to_string()
     }

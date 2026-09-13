@@ -2,6 +2,10 @@
 
 > 状态:已批准方案归档;**M0 已落地并通过验收**(backend trait / region-tenant 字段 /
 > lease 锁 / 列表分页筛选 / 启动续跑),详见 docs/m0-report.md;M1 起按本文件路线推进。
+> **M1 的管控面高可用/多副本细节已由 [control-plane-ha-design.md](./control-plane-ha-design.md)
+> 收敛为可实现的契约**(自带多数派仲裁 + fence + 无状态网关 + ingress 角色 + sink 投影),
+> 验收锚点见 [control-plane-ha-acceptance.md](./control-plane-ha-acceptance.md);本文 §6/§7/§12
+> 为路线口径,与设计文档冲突时**以设计文档为准**。
 > 目标:单 region ≤3 万实例、单 shard ≤1 万、全局 ~10 万实例;控制面可跨 region 部署,
 > 数据面主从可跨 region;审计分级保留。基线决策 2026-09-02 与需求方对齐(见 §3)。
 
@@ -108,6 +112,10 @@
 - **锁**:实例级互斥改为 **lease 行**(`holder`、`lease_until`):获取=条件 UPDATE,TTL 续约,
   失联自动过期;状态机规则(仅 运行/降级/失败 可销毁 等)不变,落在控制器层;多副本下
   同一实例同时只有一个 holder。
+- **收敛(M0 后)**:`Clear_all_locks`/`mark_interrupted` 属**单控制端语义**,多副本下不可用;
+  租约的过期判定不得依赖各副本本地时钟;续约失败必须停手而非继续执行。上述三点的目标契约、
+  多数派仲裁形态(分片组共识)、fence 与执行面强制点见
+  [control-plane-ha-design.md](./control-plane-ha-design.md) §5/§9。
 
 ---
 
@@ -218,6 +226,8 @@
     AI-0 S2/S3 为可运行原型,M1 照单接入;
 - **M1.5 跨区控制面**:每 region 独立控制面+库;Global Brain 只读目录/审计;网关按
   region 路由;会话共享。验收:A/B 区独立可用、A 区整体故障不影响 B 区。
+  实现口径(每 region 一套分片组 + 区域目录只读汇聚 + 跨 shard saga)见
+  [control-plane-ha-design.md](./control-plane-ha-design.md) §16 M1.5。
 - **M2 跨区主从**:topology_links + 跨区建从/加从 + 跨区链路巡检 + DR 提升状态机与
   fence + 路由就近读。验收:跨区建从/校验/告警/DR 演练。
 - **M3 十万级压测硬化**:故障注入(节点/库/队列/agent/时钟漂移)、容量参数化 SLO 文档。

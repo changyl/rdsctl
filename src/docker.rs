@@ -17,7 +17,11 @@ pub async fn docker(args: &[&str]) -> Result<String, String> {
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
     if !out.status.success() {
-        return Err(format!("docker {} 失败: {}", args.join(" "), if stderr.is_empty() { stdout } else { stderr }));
+        return Err(format!(
+            "docker {} 失败: {}",
+            args.join(" "),
+            if stderr.is_empty() { stdout } else { stderr }
+        ));
     }
     Ok(stdout)
 }
@@ -54,6 +58,13 @@ pub async fn restart(container: &str) -> Result<(), String> {
 pub async fn rm(container: &str) -> Result<(), String> {
     // -f 强制;不存在则忽略
     docker(&["rm", "-f", container]).await?;
+    Ok(())
+}
+
+/// docker rm -f -v(连同匿名/命名卷一并删除;xenon 节点销毁用:
+/// 数据卷与 raft.meta 随容器清除,与 xenon deploy xenon.sh clean 的 down -v 语义一致)
+pub async fn rm_v(container: &str) -> Result<(), String> {
+    docker(&["rm", "-f", "-v", container]).await?;
     Ok(())
 }
 
@@ -100,21 +111,33 @@ pub async fn wait_healthy(container: &str, timeout_secs: u64) -> Result<(), Stri
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     let logs = logs_tail(container, 30).await.unwrap_or_default();
-    Err(format!("容器 {container} 未在 {timeout_secs}s 内就绪\n最近日志:\n{logs}"))
+    Err(format!(
+        "容器 {container} 未在 {timeout_secs}s 内就绪\n最近日志:\n{logs}"
+    ))
 }
 
 /// 等待容器内 MySQL 可接受连接(mysql:8.0 官方镜像无 healthcheck,
 /// 容器"运行中"≠ MySQL 就绪,需用 SELECT 1 探测)
-pub async fn wait_mysql_ready(container: &str, user: &str, pass: &str, timeout_secs: u64) -> Result<(), String> {
+pub async fn wait_mysql_ready(
+    container: &str,
+    user: &str,
+    pass: &str,
+    timeout_secs: u64,
+) -> Result<(), String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     while std::time::Instant::now() < deadline {
-        if exec_mysql_local(container, user, pass, "SELECT 1").await.is_ok() {
+        if exec_mysql_local(container, user, pass, "SELECT 1")
+            .await
+            .is_ok()
+        {
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
     }
     let logs = logs_tail(container, 30).await.unwrap_or_default();
-    Err(format!("容器 {container} 内 MySQL 未在 {timeout_secs}s 内就绪\n最近日志:\n{logs}"))
+    Err(format!(
+        "容器 {container} 内 MySQL 未在 {timeout_secs}s 内就绪\n最近日志:\n{logs}"
+    ))
 }
 
 pub async fn logs_tail(container: &str, n: usize) -> Result<String, String> {
@@ -160,17 +183,28 @@ pub async fn network_rm(name: &str) -> Result<(), String> {
 
 /// docker exec 容器执行 mysql 客户端:host/port 为容器内可达地址
 #[allow(dead_code)] // 备用编排工具(未来 Step 可能使用)
-pub async fn exec_mysql(container: &str, host: &str, port: u16, user: &str, pass: &str, sql: &str) -> Result<String, String> {
+pub async fn exec_mysql(
+    container: &str,
+    host: &str,
+    port: u16,
+    user: &str,
+    pass: &str,
+    sql: &str,
+) -> Result<String, String> {
     docker(&[
         "exec",
         container,
         "mysql",
-        "-h", host,
-        "-P", &port.to_string(),
-        "-u", user,
+        "-h",
+        host,
+        "-P",
+        &port.to_string(),
+        "-u",
+        user,
         &format!("-p{pass}"),
         "-N",
-        "-e", sql,
+        "-e",
+        sql,
     ])
     .await
 }
@@ -182,16 +216,27 @@ pub async fn exec_in(container: &str, args: &[String]) -> Result<String, String>
     docker(&cmd).await
 }
 
-/// 在 MySQL 容器内执行 SQL(本机 socket 方式,无表头输出)
-pub async fn exec_mysql_local(container: &str, user: &str, pass: &str, sql: &str) -> Result<String, String> {
+/// 在 MySQL 容器内执行 SQL(统一 TCP 方式,无表头输出)。
+/// --protocol=TCP:不依赖容器内 socket 路径(mysql:8.0 官方镜像 socket 在
+/// /var/lib/mysql/mysql.sock,xenon 镜像在 /var/run/mysqld/mysqld.sock);
+/// mysqld 始终监听 3306/TCP,统一走 TCP 对两类镜像均成立。
+pub async fn exec_mysql_local(
+    container: &str,
+    user: &str,
+    pass: &str,
+    sql: &str,
+) -> Result<String, String> {
     docker(&[
         "exec",
         container,
         "mysql",
         "-N",
-        "-u", user,
+        "--protocol=TCP",
+        "-u",
+        user,
         &format!("-p{pass}"),
-        "-e", sql,
+        "-e",
+        sql,
     ])
     .await
 }
@@ -212,7 +257,9 @@ pub async fn query_table(
     let sq = shell_sq(sql);
     // 默认库(修复 "No database selected"):仅当是合法标识符时注入 -D,否则忽略
     let db_flag = if !default_db.is_empty()
-        && default_db.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+        && default_db
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
     {
         format!(" -D {default_db}")
     } else {
@@ -220,9 +267,10 @@ pub async fn query_table(
     };
     // 用户/口令为受控值(固定账号名/hex 口令/root),不做 shell 引号处理;
     // SQL 需完整经单引号转义后作为 mysql -e 的单个 argv。
+    // --protocol=TCP:不依赖容器内 socket 路径(xenon 镜像 socket 在 /var/run/mysqld)
     let cmd = format!(
         "timeout -s KILL {secs} mysql --batch --column-names --default-character-set=utf8mb4 \
-         --connect-timeout=5 -u {user} -p{pass}{db_flag} -e {sq}"
+         --connect-timeout=5 --protocol=TCP -u {user} -p{pass}{db_flag} -e {sq}"
     );
     let fut = tokio::process::Command::new("docker")
         .args(["exec", container, "sh", "-c", cmd.as_str()])
@@ -259,16 +307,20 @@ fn shell_sq(s: &str) -> String {
     out
 }
 
-
 /// 宿主机 mysql 客户端连接(经映射端口,用于验证代理连通性)
 pub async fn host_mysql(port: u16, user: &str, pass: &str, sql: &str) -> Result<String, String> {
     let out = tokio::process::Command::new("mysql")
         .args([
-            "-h", "127.0.0.1",
-            "-P", &port.to_string(),
-            "-u", user,
+            "-h",
+            "127.0.0.1",
+            "-P",
+            &port.to_string(),
+            "-u",
+            user,
             &format!("-p{pass}"),
-            "-N", "-e", sql,
+            "-N",
+            "-e",
+            sql,
         ])
         .output()
         .await
@@ -276,7 +328,10 @@ pub async fn host_mysql(port: u16, user: &str, pass: &str, sql: &str) -> Result<
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
     if !out.status.success() {
-        return Err(format!("mysql :{port} 查询失败: {}", if stderr.is_empty() { stdout } else { stderr }));
+        return Err(format!(
+            "mysql :{port} 查询失败: {}",
+            if stderr.is_empty() { stdout } else { stderr }
+        ));
     }
     Ok(stdout)
 }
@@ -284,7 +339,9 @@ pub async fn host_mysql(port: u16, user: &str, pass: &str, sql: &str) -> Result<
 /// 判断容器内某路径文件是否存在(docker exec test)
 #[allow(dead_code)] // 备用编排工具(未来 Step 可能使用)
 pub async fn exec_test(container: &str, path: &str) -> bool {
-    docker(&["exec", container, "test", "-e", path]).await.is_ok()
+    docker(&["exec", container, "test", "-e", path])
+        .await
+        .is_ok()
 }
 
 /// 向容器写入文件(docker cp stdin → /dev/stdin 不可用,用 exec tee 方案:
@@ -293,7 +350,14 @@ pub async fn exec_test(container: &str, path: &str) -> bool {
 pub async fn write_file(container: &str, path: &str, content: &str) -> Result<(), String> {
     // 经 stdin 管道写入:docker exec -i container sh -c 'cat > path'
     let mut child = tokio::process::Command::new("docker")
-        .args(["exec", "-i", container, "sh", "-c", &format!("cat > {path}")])
+        .args([
+            "exec",
+            "-i",
+            container,
+            "sh",
+            "-c",
+            &format!("cat > {path}"),
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -301,12 +365,24 @@ pub async fn write_file(container: &str, path: &str, content: &str) -> Result<()
         .map_err(|e| format!("docker exec spawn 失败: {e}"))?;
     use tokio::io::AsyncWriteExt;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(content.as_bytes()).await.map_err(|e| format!("写入 stdin 失败: {e}"))?;
-        stdin.shutdown().await.map_err(|e| format!("关闭 stdin 失败: {e}"))?;
+        stdin
+            .write_all(content.as_bytes())
+            .await
+            .map_err(|e| format!("写入 stdin 失败: {e}"))?;
+        stdin
+            .shutdown()
+            .await
+            .map_err(|e| format!("关闭 stdin 失败: {e}"))?;
     }
-    let out = child.wait_with_output().await.map_err(|e| format!("等待失败: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("等待失败: {e}"))?;
     if !out.status.success() {
-        return Err(format!("写入 {path} 失败: {}", String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "写入 {path} 失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
     Ok(())
 }

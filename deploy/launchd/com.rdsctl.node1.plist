@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  rdsctl 控制面节点(launchd;macOS 开发/演练用)
+
+  用途:在没有 systemd 的 macOS 上提供与 deploy/systemd/rdsctl@.service 等价的
+        "崩溃自动拉起"语义(设计文档前提 A5),便于本机多副本演练。
+
+  安装:
+    cp deploy/launchd/com.rdsctl.node1.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.rdsctl.node1.plist
+  停止/卸载:
+    launchctl unload -w ~/Library/LaunchAgents/com.rdsctl.node1.plist
+
+  多副本:复制本文件为 com.rdsctl.node2.plist / node3.plist,修改 Label、
+  ProgramArguments 里的端口与 --node-id、以及 EnvironmentVariables。注意每个副本
+  必须有独立的 RDSCTL_DATA_DIR(否则日志/快照目录互相覆盖)。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.rdsctl.node1</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/rdsctl/rdsctl</string>
+    <string>--port</string>
+    <string>9113</string>
+    <!-- 集群模式改为(示例):
+    <string>serve</string>
+    <string>--roles=gateway,controller</string>
+    <string>--node-id=node1</string>
+    <string>--cluster=1@127.0.0.1:9331,2@127.0.0.1:9332,3@127.0.0.1:9333</string>
+    <string>--shards=0-1</string>
+    -->
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RDSCTL_PORT</key>
+    <string>9113</string>
+    <key>RDSCTL_MODE</key>
+    <string>single</string>
+    <key>RDSCTL_NODE_ID</key>
+    <string>node1</string>
+    <key>RDSCTL_DATA_DIR</key>
+    <string>/opt/rdsctl/logs/ha/node1</string>
+    <key>RDSCTL_MAX_SKEW_MS</key>
+    <string>1000</string>
+    <key>RDSCTL_CONTROLLER_ID</key>
+    <string>node1</string>
+    <key>RDSCTL_RESUME_TASKS</key>
+    <string>1</string>
+    <key>RUST_LOG</key>
+    <string>info</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/opt/rdsctl</string>
+
+  <!-- 崩溃即拉起;ThrottleInterval 防止紧密重启循环 -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <key>StandardOutPath</key>
+  <string>/opt/rdsctl/logs/rdsctl-node1.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/opt/rdsctl/logs/rdsctl-node1.err.log</string>
+</dict>
+</plist>

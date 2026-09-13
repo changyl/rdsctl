@@ -40,6 +40,12 @@ rdsctl 一键部署 / 清理
                                        附加:删除 rdsctl.env(下次 deploy 按默认重新生成)
   ./scripts/deploy.sh help              显示本帮助
 
+集群(cluster)模式:
+  - 单机多副本一键起停用 ./scripts/cluster.sh up|status|down(开发/演练);
+  - 本脚本 --cluster 面向"按节点部署"(可配合 deploy/systemd/rdsctl@.service 使用);
+  - cluster 模式的前提检查(时钟/fsync/voter/agent)由 deploy/bin/rdsctl-preflight.sh 承担,
+    不通过即拒绝启动(退出码 2),不会"看起来部署成功"。
+
 注意:重复执行 deploy 即"重新部署"(停旧起新);清理属破坏性操作,请确认后再执行。
 EOF
 }
@@ -122,15 +128,29 @@ esac
 SKIP_BUILD=0
 DO_TEST=0
 BUILD_PROFILE="release"
+RUN_PREFLIGHT=0
 for a in "$@"; do
   case "$a" in
     --skip-build) SKIP_BUILD=1 ;;
     --test) DO_TEST=1 ;;
     --debug) BUILD_PROFILE="debug" ;;
     --lean) BUILD_PROFILE="dev-lean" ;;
+    --cluster) RDSCTL_MODE=cluster; export RDSCTL_MODE; RUN_PREFLIGHT=1 ;;
+    --no-preflight) RUN_PREFLIGHT=0 ;;
     *) echo "未知参数: $a" >&2; exit 2 ;;
   esac
 done
+
+# cluster 模式:先把环境校验清楚(缺 node-id/成员表、voter 非奇数等直接拒绝)
+cluster_validate
+
+# 编译档案 → 二进制:显式导出,使后续 status/logs 报告的是**真正在跑的那个**产物
+case "$BUILD_PROFILE" in
+  debug) RDSCTL_BIN="$ROOT/target/debug/rdsctl" ;;
+  dev-lean) RDSCTL_BIN="$ROOT/target/dev-lean/rdsctl" ;;
+  *) RDSCTL_BIN="$ROOT/target/release/rdsctl" ;;
+esac
+export RDSCTL_BIN
 
 # 首次生成默认配置文件(便于用户按需修改后重跑)
 if [ ! -f "$RDSCTL_ENV_FILE" ] && [ -f "$ROOT/rdsctl.env.example" ]; then
@@ -140,7 +160,20 @@ fi
 
 echo "══════════════ rdsctl 部署 ══════════════"
 info "目录   : $ROOT"
+info "模式   : $RDSCTL_MODE$([ "$RDSCTL_MODE" = cluster ] && echo " (node=$RDSCTL_NODE_ID, rpc=${RDSCTL_RPC_PORT:-9330}, data=${RDSCTL_DATA_DIR:-?})")"
 mysql_info
+
+# 0) cluster 模式:前提门禁(时钟/fsync/voter/agent;不通过即退出,不"假装成功")
+if [ "$RDSCTL_MODE" = "cluster" ] && [ "$RUN_PREFLIGHT" = "1" ]; then
+  if [ -x "$ROOT/deploy/bin/rdsctl-preflight.sh" ]; then
+    info "运行前提自检: deploy/bin/rdsctl-preflight.sh $RDSCTL_NODE_ID"
+    if ! "$ROOT/deploy/bin/rdsctl-preflight.sh" "$RDSCTL_NODE_ID"; then
+      die "前提自检未通过,拒绝部署(见上;lab 可用 RDSCTL_PREFLIGHT_ALLOW_UNVERIFIED_CLOCK=1 / RDSCTL_ALLOW_NO_AGENT=1 显式放行)"
+    fi
+  else
+    warn "未找到 deploy/bin/rdsctl-preflight.sh,跳过前提自检(不推荐)"
+  fi
+fi
 
 # 1) 编译
 if [ "$SKIP_BUILD" = "0" ]; then
@@ -153,8 +186,12 @@ else
   info "跳过编译(--skip-build)"
 fi
 
-# 2) MySQL 可用
-"$ROOT/scripts/mysql.sh" start
+# 2) MySQL 可用(cluster 模式:sink 只是投影,仅 sink=mysql 时需要)
+if [ "$RDSCTL_MODE" = "cluster" ] && [ "${RDSCTL_METADATA_SINK:-mysql}" != "mysql" ]; then
+  info "cluster + RDSCTL_METADATA_SINK=${RDSCTL_METADATA_SINK}:不依赖控制库,跳过 MySQL"
+else
+  "$ROOT/scripts/mysql.sh" start
+fi
 
 # 3) 服务重启
 "$ROOT/scripts/rdsctl.sh" stop || true
@@ -169,13 +206,25 @@ PORT="$RDSCTL_PORT"
 "$ROOT/scripts/rdsctl.sh" status
 
 echo "══════════════ 部署完成 ══════════════"
-echo "  管控页面 : http://127.0.0.1:$PORT/rds"
-echo "  登录凭据 : $RDSCTL_USER / $RDSCTL_PASS"
-echo "  审计 API : /api/rds/audit"
-echo "  常用命令 :"
-echo "    ./scripts/rdsctl.sh status|logs|stop|restart"
-echo "    ./scripts/mysql.sh status|stop|start"
-echo "    ./scripts/build.sh --test   # 单元 + P0 验收"
+if [ "$RDSCTL_MODE" = "cluster" ]; then
+  echo "  本节点   : $RDSCTL_NODE_ID(rpc ${RDSCTL_RPC_PORT:-9330},数据 ${RDSCTL_DATA_DIR:-?})"
+  echo "  探针     : http://127.0.0.1:$PORT/healthz 与 /readyz"
+  echo "  集群成员 : $RDSCTL_CLUSTER"
+  echo "  注意     : 集群模式公开端口只提供探针与完整 API(取决于 sink),不提供登录页"
+  echo "  常用命令 :"
+  echo "    ./scripts/rdsctl.sh status|logs|stop|restart     # 单节点"
+  echo "    ./scripts/cluster.sh status                      # 同机多副本总览"
+  echo "    ./scripts/ha-drill.sh                            # 端到端演练(起→验→停)"
+  echo "    deploy/systemd/rdsctl@.service                   # 生产(多机)按节点守护"
+else
+  echo "  管控页面 : http://127.0.0.1:$PORT/rds"
+  echo "  登录凭据 : $RDSCTL_USER / $RDSCTL_PASS"
+  echo "  审计 API : /api/rds/audit"
+  echo "  常用命令 :"
+  echo "    ./scripts/rdsctl.sh status|logs|stop|restart"
+  echo "    ./scripts/mysql.sh status|stop|start"
+  echo "    ./scripts/build.sh --test   # 单元 + P0 验收"
+fi
 
 # 5) 可选:P0 验收
 if [ "$DO_TEST" = "1" ]; then

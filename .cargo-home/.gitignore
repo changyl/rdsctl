@@ -1,0 +1,5 @@
+# 本目录只提交 config.toml;cargo 运行时会在此生成 registry/.package-cache 等簿记目录,
+# 它们与离线构建无关,不入库(避免噪声与体积)。
+*
+!.gitignore
+!config.toml

@@ -10,7 +10,11 @@
 //   POST /api/rds/destroy?name=x   销毁实例
 //   POST /api/rds/scaleout?name=x&role=stats|backup|read  扩容从节点
 
-use crate::{dag::{Step, TaskNode}, instance::Role, manager};
+use crate::{
+    dag::{Step, TaskNode},
+    instance::Role,
+    manager,
+};
 use serde_json::json;
 
 /// GET /api/rds/instances?region=&az=&status=&tenant=&q=&limit=&offset=
@@ -18,9 +22,16 @@ use serde_json::json;
 pub fn instances(query: &str) -> String {
     let opt = |k: &str| {
         let v = qparam(query, k);
-        if v.is_empty() { None } else { Some(v) }
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
     };
-    let limit = qparam(query, "limit").parse::<usize>().unwrap_or(200).min(1000);
+    let limit = qparam(query, "limit")
+        .parse::<usize>()
+        .unwrap_or(200)
+        .min(1000);
     let offset = qparam(query, "offset").parse::<usize>().unwrap_or(0);
     let region = opt("region");
     let az = opt("az");
@@ -50,11 +61,23 @@ pub fn instances(query: &str) -> String {
 pub fn instance(query: &str) -> (u16, &'static str, String) {
     let name = qparam(query, "name");
     if name.is_empty() {
-        return (400, "application/json", json!({ "error": "缺少 name 参数" }).to_string());
+        return (
+            400,
+            "application/json",
+            json!({ "error": "缺少 name 参数" }).to_string(),
+        );
     }
     match manager().get(&name) {
-        Some(v) => (200, "application/json", json!({ "instance": v }).to_string()),
-        None => (404, "application/json", json!({ "error": format!("实例 {name} 不存在") }).to_string()),
+        Some(v) => (
+            200,
+            "application/json",
+            json!({ "instance": v }).to_string(),
+        ),
+        None => (
+            404,
+            "application/json",
+            json!({ "error": format!("实例 {name} 不存在") }).to_string(),
+        ),
     }
 }
 
@@ -72,7 +95,11 @@ pub fn task(query: &str) -> (u16, &'static str, String) {
     let id = qparam(query, "id");
     match manager().scheduler.get(&id) {
         Some(v) => (200, "application/json", json!({ "task": v }).to_string()),
-        None => (404, "application/json", json!({ "error": format!("任务 {id} 不存在") }).to_string()),
+        None => (
+            404,
+            "application/json",
+            json!({ "error": format!("任务 {id} 不存在") }).to_string(),
+        ),
     }
 }
 
@@ -82,15 +109,23 @@ pub fn create(query: &str) -> (u16, &'static str, String) {
     let opts = crate::instance::CreateOpts {
         itype: {
             let t = qparam(query, "itype");
-            if t.is_empty() { "async".to_string() } else { t }
+            if t.is_empty() {
+                "async".to_string()
+            } else {
+                t
+            }
         },
-        proxies: qparam(query, "proxies").parse::<u32>().unwrap_or(2).clamp(1, 4),
+        proxies: qparam(query, "proxies")
+            .parse::<u32>()
+            .unwrap_or(2)
+            .clamp(1, 4),
         region: qparam(query, "region"),
         az: qparam(query, "az"),
         biz: qparam(query, "biz"),
         contact: qparam(query, "contact"),
         dba: qparam(query, "dba"),
-        core: qparam(query, "core").as_str() == "1" || qparam(query, "core").eq_ignore_ascii_case("true"),
+        core: qparam(query, "core").as_str() == "1"
+            || qparam(query, "core").eq_ignore_ascii_case("true"),
         spec: qparam(query, "spec"),
         shard_num: u(&qparam(query, "shard_num")),
         data_size: qparam(query, "data_size"),
@@ -99,20 +134,43 @@ pub fn create(query: &str) -> (u16, &'static str, String) {
         max_tps: u(&qparam(query, "max_tps")),
         mysql_version: qparam(query, "mysql_version"),
         proxy_version: qparam(query, "proxy_version"),
-        dts: qparam(query, "dts").as_str() == "1" || qparam(query, "dts").eq_ignore_ascii_case("true"),
+        dts: qparam(query, "dts").as_str() == "1"
+            || qparam(query, "dts").eq_ignore_ascii_case("true"),
         dts_spec: qparam(query, "dts_spec"),
+        xenon_nodes: qparam(query, "xenon_nodes").parse::<u32>().unwrap_or(3),
+        xenon_proxy: qparam(query, "xenon_proxy").parse::<u32>().unwrap_or(0),
+        xenon_consistency: {
+            let c = qparam(query, "xenon_consistency");
+            if c.is_empty() { "strong".to_string() } else { c }
+        },
     };
     match manager().create(&name, &opts) {
-        Ok(tid) => (200, "application/json", json!({ "ok": true, "task_id": tid }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Ok(tid) => (
+            200,
+            "application/json",
+            json!({ "ok": true, "task_id": tid }).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
 pub fn destroy(query: &str) -> (u16, &'static str, String) {
     let name = qparam(query, "name");
     match manager().destroy(&name) {
-        Ok(tid) => (200, "application/json", json!({ "ok": true, "task_id": tid }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Ok(tid) => (
+            200,
+            "application/json",
+            json!({ "ok": true, "task_id": tid }).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -120,11 +178,19 @@ pub fn destroy(query: &str) -> (u16, &'static str, String) {
 pub fn delete_instance(query: &str) -> (u16, &'static str, String) {
     let name = qparam(query, "name");
     if name.is_empty() {
-        return (400, "application/json", json!({ "ok": false, "error": "缺少 name 参数" }).to_string());
+        return (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": "缺少 name 参数" }).to_string(),
+        );
     }
     match manager().delete_instance(&name) {
         Ok(()) => (200, "application/json", json!({ "ok": true }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -142,12 +208,21 @@ pub fn scaleout(query: &str) -> (u16, &'static str, String) {
             return (
                 400,
                 "application/json",
-                json!({ "ok": false, "error": format!("未知角色 {other}(支持 read/offline)") }).to_string(),
+                json!({ "ok": false, "error": format!("未知角色 {other}(支持 read/offline)") })
+                    .to_string(),
             )
         }
     };
-    let region_o = if region.is_empty() { None } else { Some(region.as_str()) };
-    let az_o = if az.is_empty() { None } else { Some(az.as_str()) };
+    let region_o = if region.is_empty() {
+        None
+    } else {
+        Some(region.as_str())
+    };
+    let az_o = if az.is_empty() {
+        None
+    } else {
+        Some(az.as_str())
+    };
     // shard:多分片实例分片级扩容目标(s1..sN);不传=实例级(单分片实例)/被多分片守卫拒绝
     let shard = qparam(query, "shard");
     let r = if shard.is_empty() {
@@ -156,8 +231,16 @@ pub fn scaleout(query: &str) -> (u16, &'static str, String) {
         manager().scaleout_shard(&name, &shard, role, region_o, az_o)
     };
     match r {
-        Ok(tid) => (200, "application/json", json!({ "ok": true, "task_id": tid }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Ok(tid) => (
+            200,
+            "application/json",
+            json!({ "ok": true, "task_id": tid }).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -165,11 +248,23 @@ pub fn scaleout(query: &str) -> (u16, &'static str, String) {
 pub fn backup(query: &str) -> (u16, &'static str, String) {
     let name = qparam(query, "name");
     if name.is_empty() {
-        return (400, "application/json", json!({ "ok": false, "error": "缺少 name 参数" }).to_string());
+        return (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": "缺少 name 参数" }).to_string(),
+        );
     }
     match manager().run_backup(&name) {
-        Ok(tid) => (200, "application/json", json!({ "ok": true, "task_id": tid }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Ok(tid) => (
+            200,
+            "application/json",
+            json!({ "ok": true, "task_id": tid }).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -186,17 +281,74 @@ pub fn dts_list(query: &str) -> (u16, &'static str, String) {
 pub async fn orch_facts(query: &str) -> (u16, &'static str, String) {
     let name = qparam(query, "instance");
     if name.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少 instance 参数"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 instance 参数"}).to_string(),
+        );
     }
     let facts = manager().orch_facts(&name).await;
-    (200, "application/json", json!({ "facts": facts }).to_string())
+    (
+        200,
+        "application/json",
+        json!({ "facts": facts }).to_string(),
+    )
+}
+
+/// GET /api/rds/xenon/raft?instance= —— xenon raft 集群实况(逐节点状态 + 共识 leader)
+pub async fn xenon_raft(query: &str) -> (u16, &'static str, String) {
+    let name = qparam(query, "instance");
+    if name.is_empty() {
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 instance 参数"}).to_string(),
+        );
+    }
+    match manager().xenon_raft_view(&name).await {
+        Ok(v) => (200, "application/json", v.to_string()),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
+    }
+}
+
+/// POST /api/rds/xenon/raft/trytoleader?instance=&node= —— 让成员尝试成为 raft leader
+pub async fn xenon_raft_trytoleader(query: &str) -> (u16, &'static str, String) {
+    let name = qparam(query, "instance");
+    let node = qparam(query, "node");
+    if name.is_empty() || node.is_empty() {
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 instance/node 参数"}).to_string(),
+        );
+    }
+    match manager().xenon_raft_trytoleader(&name, &node).await {
+        Ok(out) => (
+            200,
+            "application/json",
+            json!({"ok":true,"message":out}).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
+    }
 }
 
 /// GET /api/rds/orch/ops?instance= —— 受管切换动作视图(进行中 + 历史)
 pub fn orch_ops(query: &str) -> (u16, &'static str, String) {
     let name = qparam(query, "instance");
     if name.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少 instance 参数"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 instance 参数"}).to_string(),
+        );
     }
     let view = manager().orch_ops_view(&name);
     (200, "application/json", view.to_string())
@@ -206,15 +358,35 @@ pub fn orch_ops(query: &str) -> (u16, &'static str, String) {
 pub fn orch_reparent(query: &str) -> (u16, &'static str, String) {
     let instance = qparam(query, "instance");
     if instance.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少 instance 参数"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 instance 参数"}).to_string(),
+        );
     }
     let target = qparam(query, "target");
     let mode = qparam(query, "mode");
-    let mode = if mode.is_empty() { "auto".to_string() } else { mode };
-    let t = if target.is_empty() { None } else { Some(target) };
+    let mode = if mode.is_empty() {
+        "auto".to_string()
+    } else {
+        mode
+    };
+    let t = if target.is_empty() {
+        None
+    } else {
+        Some(target)
+    };
     match manager().orch_reparent(&instance, t.as_deref(), &mode) {
-        Ok(opid) => (200, "application/json", json!({ "ok": true, "op_id": opid }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Ok(opid) => (
+            200,
+            "application/json",
+            json!({ "ok": true, "op_id": opid }).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -222,11 +394,23 @@ pub fn orch_reparent(query: &str) -> (u16, &'static str, String) {
 pub fn orch_rollback(query: &str) -> (u16, &'static str, String) {
     let instance = qparam(query, "instance");
     if instance.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少 instance 参数"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 instance 参数"}).to_string(),
+        );
     }
     match manager().orch_rollback(&instance) {
-        Ok(opid) => (200, "application/json", json!({ "ok": true, "op_id": opid }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Ok(opid) => (
+            200,
+            "application/json",
+            json!({ "ok": true, "op_id": opid }).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -235,15 +419,31 @@ pub fn dts_create(query: &str) -> (u16, &'static str, String) {
     let instance = qparam(query, "instance");
     let node = qparam(query, "node");
     if instance.is_empty() || node.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少 instance/node 参数"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 instance/node 参数"}).to_string(),
+        );
     }
     let target = qparam(query, "target");
     let spec = qparam(query, "spec");
-    let t = if target.is_empty() { None } else { Some(target) };
+    let t = if target.is_empty() {
+        None
+    } else {
+        Some(target)
+    };
     let s = if spec.is_empty() { None } else { Some(spec) };
     match manager().dts_create(&instance, &node, t.as_deref(), s.as_deref()) {
-        Ok(tid) => (200, "application/json", json!({ "ok": true, "task_id": tid }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Ok(tid) => (
+            200,
+            "application/json",
+            json!({ "ok": true, "task_id": tid }).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -252,11 +452,23 @@ pub fn dts_remove(query: &str) -> (u16, &'static str, String) {
     let instance = qparam(query, "instance");
     let node = qparam(query, "node");
     if instance.is_empty() || node.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少 instance/node 参数"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 instance/node 参数"}).to_string(),
+        );
     }
     match manager().dts_remove(&instance, &node) {
-        Ok(tid) => (200, "application/json", json!({ "ok": true, "task_id": tid }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Ok(tid) => (
+            200,
+            "application/json",
+            json!({ "ok": true, "task_id": tid }).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -270,7 +482,11 @@ pub fn hosts(_query: &str) -> (u16, &'static str, String) {
         let nm = it["name"].as_str().unwrap_or("").to_string();
         it["bound"] = serde_json::json!(mgr.host_binding_count(&nm));
     }
-    (200, "application/json", json!({ "hosts": items }).to_string())
+    (
+        200,
+        "application/json",
+        json!({ "hosts": items }).to_string(),
+    )
 }
 
 /// POST /api/rds/hosts?name=&ip=&region=&az=&rack=&cpu=&mem_gb=&disk_gb=&agent_port= —— 登记/更新机器
@@ -290,7 +506,11 @@ pub fn host_create(query: &str) -> (u16, &'static str, String) {
         agent_port,
     ) {
         Ok(()) => (200, "application/json", json!({ "ok": true }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -299,7 +519,11 @@ pub fn host_delete(query: &str) -> (u16, &'static str, String) {
     let name = qparam(query, "name");
     match manager().host_delete(&name) {
         Ok(()) => (200, "application/json", json!({ "ok": true }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -309,7 +533,11 @@ pub fn host_status(query: &str) -> (u16, &'static str, String) {
     let status = qparam(query, "status");
     match manager().host_set_status(&name, &status) {
         Ok(()) => (200, "application/json", json!({ "ok": true }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -320,7 +548,11 @@ pub fn host_assign(query: &str) -> (u16, &'static str, String) {
     let host = qparam(query, "host");
     match manager().host_assign_node(&instance, &node, &host) {
         Ok(()) => (200, "application/json", json!({ "ok": true }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -330,7 +562,11 @@ pub fn host_clear(query: &str) -> (u16, &'static str, String) {
     let node = qparam(query, "node");
     match manager().host_clear_node(&instance, &node) {
         Ok(()) => (200, "application/json", json!({ "ok": true }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -341,11 +577,23 @@ pub fn replace_node(query: &str) -> (u16, &'static str, String) {
     let node = qparam(query, "node");
     let host = qparam(query, "host");
     if instance.is_empty() || node.is_empty() || host.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少 instance/node/host 参数"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 instance/node/host 参数"}).to_string(),
+        );
     }
     match manager().replace_node(&instance, &node, &host) {
-        Ok(tid) => (200, "application/json", json!({ "ok": true, "task_id": tid }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Ok(tid) => (
+            200,
+            "application/json",
+            json!({ "ok": true, "task_id": tid }).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -357,11 +605,23 @@ pub fn migrate(query: &str) -> (u16, &'static str, String) {
     let az = qparam(query, "az");
     let hosts = qparam(query, "hosts");
     if instance.is_empty() || region.is_empty() || az.is_empty() || hosts.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少 instance/region/az/hosts 参数"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 instance/region/az/hosts 参数"}).to_string(),
+        );
     }
     match manager().migrate_instance(&instance, &region, &az, &hosts) {
-        Ok(tid) => (200, "application/json", json!({ "ok": true, "task_id": tid }).to_string()),
-        Err(e) => (400, "application/json", json!({ "ok": false, "error": e }).to_string()),
+        Ok(tid) => (
+            200,
+            "application/json",
+            json!({ "ok": true, "task_id": tid }).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": e }).to_string(),
+        ),
     }
 }
 
@@ -370,11 +630,23 @@ pub fn migrate(query: &str) -> (u16, &'static str, String) {
 pub fn audit(query: &str) -> String {
     let opt = |k: &str| {
         let v = qparam(query, k);
-        if v.is_empty() { None } else { Some(v) }
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
     };
-    let limit = qparam(query, "limit").parse::<usize>().unwrap_or(200).clamp(1, 500);
+    let limit = qparam(query, "limit")
+        .parse::<usize>()
+        .unwrap_or(200)
+        .clamp(1, 500);
     let offset = qparam(query, "offset").parse::<usize>().unwrap_or(0);
-    let full = manager().audit(200_000, opt("instance").as_deref(), opt("action").as_deref(), opt("q").as_deref());
+    let full = manager().audit(
+        200_000,
+        opt("instance").as_deref(),
+        opt("action").as_deref(),
+        opt("q").as_deref(),
+    );
     let total = full.len();
     let page: Vec<serde_json::Value> = full.into_iter().skip(offset).take(limit).collect();
     serde_json::json!({ "audit": page, "total": total, "offset": offset }).to_string()
@@ -396,65 +668,332 @@ pub fn permissions() -> String {
 }
 
 pub fn users() -> String {
+    // cluster:用户/角色权威在共识状态机(设计 §11.4);single:保持读库
+    if let Some(rt) = crate::ha::runtime::global() {
+        return json!({ "users": rt.auth_users_list() }).to_string();
+    }
     json!({ "users": manager().store.users_list() }).to_string()
 }
 
-pub fn user_action(query: &str) -> (u16, &'static str, String) {
+pub async fn user_action(query: &str) -> (u16, &'static str, String) {
     let action = qparam(query, "action");
     let user = qparam(query, "user");
+    // cluster 模式:用户记录写入共识状态机(任一网关副本可见、冻结/改密对所有副本立即生效)
+    if let Some(rt) = crate::ha::runtime::global() {
+        return user_action_cluster(&rt, &action, &user, query).await;
+    }
     let m = manager();
     match action.as_str() {
         "create" | "setpass" => {
             let pass = qparam(query, "pass");
             if user.is_empty() || pass.len() < 4 {
-                return (400, "application/json", json!({"ok":false,"error":"用户名必填且密码至少 4 位"}).to_string());
+                return (
+                    400,
+                    "application/json",
+                    json!({"ok":false,"error":"用户名必填且密码至少 4 位"}).to_string(),
+                );
             }
             let enabled = qparam(query, "enabled").as_str() != "0";
             let (salt, hash) = crate::store::password_salt_hash(&pass);
             m.store.user_upsert(&user, &salt, &hash, enabled);
-            m.store.audit(&crate::auth::current_user(), "", if action=="create" {"user_create"} else {"user_setpass"}, &user, "ok", "");
+            m.store.audit(
+                &crate::auth::current_user(),
+                "",
+                if action == "create" {
+                    "user_create"
+                } else {
+                    "user_setpass"
+                },
+                &user,
+                "ok",
+                "",
+            );
             (200, "application/json", json!({"ok":true}).to_string())
         }
         "enabled" => {
             let enabled = qparam(query, "value").as_str() != "0";
             m.store.user_set_enabled(&user, enabled);
-            m.store.audit(&crate::auth::current_user(), "", if enabled {"user_enable"} else {"user_freeze"}, &user, "ok", "");
+            m.store.audit(
+                &crate::auth::current_user(),
+                "",
+                if enabled {
+                    "user_enable"
+                } else {
+                    "user_freeze"
+                },
+                &user,
+                "ok",
+                "",
+            );
             (200, "application/json", json!({"ok":true}).to_string())
         }
         "roles" => {
             let roles_csv = qparam(query, "roles");
             let roles: Vec<&str> = roles_csv.split(',').filter(|s| !s.is_empty()).collect();
             m.store.user_roles_set(&user, &roles);
-            m.store.audit(&crate::auth::current_user(), "", "user_roles", &format!("{user} <- {roles:?}"), "ok", "");
+            m.store.audit(
+                &crate::auth::current_user(),
+                "",
+                "user_roles",
+                &format!("{user} <- {roles:?}"),
+                "ok",
+                "",
+            );
             (200, "application/json", json!({"ok":true}).to_string())
         }
-        _ => (400, "application/json", json!({"ok":false,"error":"未知操作"}).to_string()),
+        _ => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"未知操作"}).to_string(),
+        ),
     }
 }
 
 pub fn roles() -> String {
+    if let Some(rt) = crate::ha::runtime::global() {
+        return json!({ "roles": rt.auth_roles_list() }).to_string();
+    }
     json!({ "roles": manager().store.roles_list() }).to_string()
 }
 
-pub fn role_action(query: &str) -> (u16, &'static str, String) {
+pub async fn role_action(query: &str) -> (u16, &'static str, String) {
     let action = qparam(query, "action");
     let role = qparam(query, "role");
+    if let Some(rt) = crate::ha::runtime::global() {
+        return role_action_cluster(&rt, &action, &role, query).await;
+    }
     let m = manager();
     match action.as_str() {
         "create" => {
-            if role.is_empty() { return (400,"application/json",json!({"ok":false,"error":"角色名必填"}).to_string()); }
+            if role.is_empty() {
+                return (
+                    400,
+                    "application/json",
+                    json!({"ok":false,"error":"角色名必填"}).to_string(),
+                );
+            }
             m.store.role_upsert(&role, &qparam(query, "desc"));
-            m.store.audit(&crate::auth::current_user(), "", "role_create", &role, "ok", "");
-            (200,"application/json",json!({"ok":true}).to_string())
+            m.store.audit(
+                &crate::auth::current_user(),
+                "",
+                "role_create",
+                &role,
+                "ok",
+                "",
+            );
+            (200, "application/json", json!({"ok":true}).to_string())
         }
         "perms" => {
             let perms_csv = qparam(query, "perms");
             let perms: Vec<&str> = perms_csv.split(',').filter(|s| !s.is_empty()).collect();
             m.store.role_perms_set(&role, &perms);
-            m.store.audit(&crate::auth::current_user(), "", "role_perms", &format!("{role} = {perms:?}"), "ok", "");
-            (200,"application/json",json!({"ok":true}).to_string())
+            m.store.audit(
+                &crate::auth::current_user(),
+                "",
+                "role_perms",
+                &format!("{role} = {perms:?}"),
+                "ok",
+                "",
+            );
+            (200, "application/json", json!({"ok":true}).to_string())
         }
-        _ => (400,"application/json",json!({"ok":false,"error":"未知操作"}).to_string()),
+        _ => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"未知操作"}).to_string(),
+        ),
+    }
+}
+
+/// cluster 模式的用户管理:写入共识状态机(设计 §11.4)。
+///
+/// 与 single 模式的差别只有"写到哪":校验、审计动作名、返回体完全一致,
+/// 因此前端与既有用例无需区分模式。
+async fn user_action_cluster(
+    rt: &std::sync::Arc<crate::ha::runtime::ClusterRuntime>,
+    action: &str,
+    user: &str,
+    query: &str,
+) -> (u16, &'static str, String) {
+    use crate::ha::auth::AuthError as AE;
+    let actor = crate::auth::current_user();
+    let map_err = |e: AE| -> (u16, &'static str, String) {
+        let (code, action_result) = match &e {
+            AE::NotReady | AE::Lagged { .. } | AE::Quorum => (503, "lagged"),
+            AE::Internal(_) => (500, "error"),
+            _ => (400, "error"),
+        };
+        (
+            code,
+            "application/json",
+            json!({ "ok": false, "error": e.to_string(), "result": action_result }).to_string(),
+        )
+    };
+    match action {
+        "create" | "setpass" => {
+            let pass = qparam(query, "pass");
+            if user.is_empty() || pass.len() < 4 {
+                return (
+                    400,
+                    "application/json",
+                    json!({"ok":false,"error":"用户名必填且密码至少 4 位"}).to_string(),
+                );
+            }
+            let enabled = qparam(query, "enabled").as_str() != "0";
+            if let Err(e) = rt
+                .auth_user_upsert(user, Some(&pass), Some(enabled), None)
+                .await
+            {
+                return map_err(e);
+            }
+            manager().store.audit(
+                &actor,
+                "",
+                if action == "create" {
+                    "user_create"
+                } else {
+                    "user_setpass"
+                },
+                user,
+                "ok",
+                "",
+            );
+            (
+                200,
+                "application/json",
+                json!({"ok":true,"message":"已写入共识状态机(改密会使该用户全部会话立即失效)"})
+                    .to_string(),
+            )
+        }
+        "enabled" => {
+            let enabled = qparam(query, "value").as_str() != "0";
+            if let Err(e) = rt.auth_user_set_enabled(user, enabled).await {
+                return map_err(e);
+            }
+            manager().store.audit(
+                &actor,
+                "",
+                if enabled {
+                    "user_enable"
+                } else {
+                    "user_freeze"
+                },
+                user,
+                "ok",
+                "",
+            );
+            (
+                200,
+                "application/json",
+                json!({"ok":true,"message":if enabled {"已解冻"} else {"已冻结(该用户全部会话立即失效)"}})
+                    .to_string(),
+            )
+        }
+        "roles" => {
+            let roles_csv = qparam(query, "roles");
+            let roles: Vec<String> = roles_csv
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            if let Err(e) = rt.auth_user_roles_set(user, roles.clone()).await {
+                return map_err(e);
+            }
+            manager().store.audit(
+                &actor,
+                "",
+                "user_roles",
+                &format!("{user} <- {roles:?}"),
+                "ok",
+                "",
+            );
+            (
+                200,
+                "application/json",
+                json!({"ok":true,"message":"已写入共识状态机(权限按角色现算,即时生效、无需重新登录)"})
+                    .to_string(),
+            )
+        }
+        _ => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"未知操作"}).to_string(),
+        ),
+    }
+}
+
+/// cluster 模式的角色管理(同上)
+async fn role_action_cluster(
+    rt: &std::sync::Arc<crate::ha::runtime::ClusterRuntime>,
+    action: &str,
+    role: &str,
+    query: &str,
+) -> (u16, &'static str, String) {
+    use crate::ha::auth::AuthError as AE;
+    let actor = crate::auth::current_user();
+    let map_err = |e: AE| -> (u16, &'static str, String) {
+        let code = match &e {
+            AE::NotReady | AE::Lagged { .. } | AE::Quorum => 503,
+            AE::Internal(_) => 500,
+            _ => 400,
+        };
+        (
+            code,
+            "application/json",
+            json!({ "ok": false, "error": e.to_string() }).to_string(),
+        )
+    };
+    match action {
+        "create" => {
+            if role.is_empty() {
+                return (
+                    400,
+                    "application/json",
+                    json!({"ok":false,"error":"角色名必填"}).to_string(),
+                );
+            }
+            if let Err(e) = rt.auth_role_upsert(role, &qparam(query, "desc")).await {
+                return map_err(e);
+            }
+            manager()
+                .store
+                .audit(&actor, "", "role_create", role, "ok", "");
+            (
+                200,
+                "application/json",
+                json!({"ok":true,"message":"已写入共识状态机"}).to_string(),
+            )
+        }
+        "perms" => {
+            let perms_csv = qparam(query, "perms");
+            let perms: Vec<String> = perms_csv
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            if let Err(e) = rt.auth_role_perms_set(role, perms.clone()).await {
+                return map_err(e);
+            }
+            manager().store.audit(
+                &actor,
+                "",
+                "role_perms",
+                &format!("{role} = {perms:?}"),
+                "ok",
+                "",
+            );
+            (
+                200,
+                "application/json",
+                json!({"ok":true,"message":"已写入共识状态机(该角色下所有用户的权限即时生效)"})
+                    .to_string(),
+            )
+        }
+        _ => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"未知操作"}).to_string(),
+        ),
     }
 }
 
@@ -465,7 +1004,11 @@ pub fn meta(query: &str) -> (u16, &'static str, String) {
     let v = qparam(query, "v");
     match manager().set_meta(&name, &k, &v) {
         Ok(()) => (200, "application/json", json!({"ok":true}).to_string()),
-        Err(e) => (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
     }
 }
 
@@ -474,12 +1017,228 @@ pub fn proxies() -> String {
     json!({ "proxies": manager().proxies() }).to_string()
 }
 
+
+/// GET /api/rds/nodes —— 跨实例节点清单(侧边栏「节点」视图)
+/// 过滤:instance / kind(db|proxy) / q(容器|实例|端口|主机)/ limit / offset
+pub fn nodes(query: &str) -> String {
+    let limit = qparam(query, "limit").parse::<usize>().unwrap_or(500);
+    let offset = qparam(query, "offset").parse::<usize>().unwrap_or(0);
+    let nonempty = |k: &str| {
+        let v = qparam(query, k);
+        if v.trim().is_empty() {
+            None
+        } else {
+            Some(v)
+        }
+    };
+    // 注意:这里用局部闭包取参(nodes_inventory 需要 Option<&str>),
+    // 与其它 handler 的 opt()/qparam() 风格保持一致
+    let inst = nonempty("instance");
+    let kind = nonempty("kind");
+    let kw = nonempty("q");
+    let (rows, summary) = manager().nodes_inventory(
+        inst.as_deref(),
+        kind.as_deref(),
+        kw.as_deref(),
+        limit,
+        offset,
+    );
+    json!({
+        "nodes": rows,
+        "summary": summary,
+        "limit": limit,
+        "offset": offset,
+    })
+    .to_string()
+}
+
+// ─── 管控集群(HA 运维面) ───
+
+fn now_ms_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 把租约类错误映射为 HTTP 状态(与实例租约路径同一套语义)
+///
+/// 同时给出机器可判的 `code` 与人可读的 `error`:前端提示直接用 `error`
+/// (`jpost` 只透出 `error`),运维脚本/自动化用 `code`。
+fn lease_err_json(e: crate::ha::runtime::LeaseError) -> (u16, &'static str, String) {
+    use crate::ha::runtime::LeaseError as E;
+    match e {
+        E::NotLeader(leader) => (
+            409,
+            "application/json",
+            json!({
+                "ok": false,
+                "code": "not_leader",
+                "leader": leader,
+                "error": match &leader {
+                    Some(l) => format!("本副本不是 leader(当前 leader={l}):该动作只在 leader 上生效"),
+                    None => "本副本不是 leader 且当前无 leader:请稍后重试".to_string(),
+                },
+            })
+            .to_string(),
+        ),
+        E::Quorum => (
+            503,
+            "application/json",
+            json!({ "ok": false, "code": "quorum_unavailable", "error": "失去多数派:该动作无法完成" })
+                .to_string(),
+        ),
+        E::Held(m) => (
+            409,
+            "application/json",
+            json!({ "ok": false, "code": "held", "error": m }).to_string(),
+        ),
+        E::Skew(ms) => (
+            409,
+            "application/json",
+            json!({
+                "ok": false,
+                "code": "skew_exceeded",
+                "skew_measured_ms": ms,
+                "error": format!("实测时钟偏移 {ms}ms 超出上限(前提 A1):请先修 NTP"),
+            })
+            .to_string(),
+        ),
+        E::Internal(m) => (
+            500,
+            "application/json",
+            json!({ "ok": false, "code": "internal", "error": m }).to_string(),
+        ),
+    }
+}
+
+/// GET /api/rds/cluster —— 管控集群视图(成员 / 角色 / term / 复制进度 / 就绪前提 / 租约台账)
+///
+/// 只在 cluster 模式有真实内容;**single 模式如实返回 `enabled=false` 与原因**,不伪造一个空集群。
+pub async fn cluster() -> (u16, &'static str, String) {
+    if let Some(rt) = crate::ha::runtime::global() {
+        return (200, "application/json", rt.cluster_view().await.to_string());
+    }
+    let mode = if crate::ha::runtime::cluster_mode() {
+        "cluster"
+    } else {
+        "single"
+    };
+    let note = if mode == "cluster" {
+        "RDSCTL_MODE=cluster 但本进程未注册共识运行时(未走 `rdsctl serve` 启动路径):集群视图不可用"
+    } else {
+        "当前为单机模式(RDSCTL_MODE=single):没有管控集群,实例互斥由进程内锁保证。多副本高可用请以 cluster 模式启动(见 docs/ops-guide-cluster.md)"
+    };
+    (
+        200,
+        "application/json",
+        json!({
+            "enabled": false,
+            "mode": mode,
+            "version": env!("CARGO_PKG_VERSION"),
+            "runtime_present": false,
+            "generated_at_ms": now_ms_u64(),
+            "quorum": serde_json::Value::Null,
+            "members": [],
+            "leases": [],
+            "notes": [note],
+        })
+        .to_string(),
+    )
+}
+
+/// POST /api/rds/cluster/stepdown —— 主动让位:leader 交还给 raft(继任者按"日志已追平优先"选择)
+pub async fn cluster_stepdown() -> (u16, &'static str, String) {
+    let Some(rt) = crate::ha::runtime::global() else {
+        return (
+            409,
+            "application/json",
+            json!({ "ok": false, "code": "not_cluster", "error": "当前不是管控集群模式,无 leader 可让位" })
+                .to_string(),
+        );
+    };
+    let actor = crate::auth::current_user();
+    match rt.step_down_leader().await {
+        Ok(v) => {
+            manager().store.audit(
+                &actor,
+                "",
+                "cluster_stepdown",
+                &format!("former_leader={}", v["former_leader"].as_str().unwrap_or("")),
+                "ok",
+                "",
+            );
+            (
+                200,
+                "application/json",
+                json!({
+                    "ok": true,
+                    "message": "已触发 leader 让位,集群将重新选主",
+                    "detail": v,
+                })
+                .to_string(),
+            )
+        }
+        Err(e) => {
+            manager().store.audit(&actor, "", "cluster_stepdown", "", "fail", &e.to_string());
+            lease_err_json(e)
+        }
+    }
+}
+
+/// POST /api/rds/cluster/resync-sink —— 重置 sink 投影游标(仅在 leader 上有效;不写库)
+pub fn cluster_resync() -> (u16, &'static str, String) {
+    let Some(rt) = crate::ha::runtime::global() else {
+        return (
+            409,
+            "application/json",
+            json!({ "ok": false, "code": "not_cluster", "error": "当前不是管控集群模式,无 sink 投影可重置" })
+                .to_string(),
+        );
+    };
+    let actor = crate::auth::current_user();
+    match rt.resync_sink() {
+        Ok(v) => {
+            manager().store.audit(
+                &actor,
+                "",
+                "cluster_resync_sink",
+                &format!(
+                    "shard={} cursor {} → 0",
+                    v["shard"].as_u64().unwrap_or(0),
+                    v["before"].as_u64().unwrap_or(0)
+                ),
+                "ok",
+                "",
+            );
+            (
+                200,
+                "application/json",
+                json!({ "ok": true, "message": "投影游标已重置,leader 下一轮从日志幂等重放", "detail": v })
+                    .to_string(),
+            )
+        }
+        Err(e) => {
+            manager().store.audit(&actor, "", "cluster_resync_sink", "", "fail", &e.to_string());
+            lease_err_json(e)
+        }
+    }
+}
+
 pub async fn proxy_action(query: &str) -> (u16, &'static str, String) {
     let container = qparam(query, "container");
     let action = qparam(query, "action");
     match manager().proxy_action(&container, &action).await {
-        Ok(msg) => (200, "application/json", json!({"ok":true,"message":msg}).to_string()),
-        Err(e) => (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Ok(msg) => (
+            200,
+            "application/json",
+            json!({"ok":true,"message":msg}).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
     }
 }
 
@@ -487,14 +1246,26 @@ pub async fn proxy_action(query: &str) -> (u16, &'static str, String) {
 pub async fn proxy_metrics(query: &str) -> (u16, &'static str, String) {
     let container = qparam(query, "container");
     if container.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少 container 参数"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 container 参数"}).to_string(),
+        );
     }
     match crate::instance::proxy_metrics_text(&container).await {
         Ok(text) => {
             let parsed = crate::instance::parse_proxy_metrics(&text);
-            (200, "application/json", json!({"ok":true,"text":text,"parsed":parsed}).to_string())
+            (
+                200,
+                "application/json",
+                json!({"ok":true,"text":text,"parsed":parsed}).to_string(),
+            )
         }
-        Err(e) => (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
     }
 }
 
@@ -502,16 +1273,35 @@ pub async fn proxy_metrics(query: &str) -> (u16, &'static str, String) {
 pub async fn monitor_dbs(query: &str) -> (u16, &'static str, String) {
     let name = qparam(query, "instance");
     if name.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少 instance 参数"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 instance 参数"}).to_string(),
+        );
     }
     let node = {
         let v = qparam(query, "node");
-        if v.is_empty() { None } else { Some(v) }
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
     };
-    let limit = qparam(query, "limit").parse::<usize>().ok().filter(|n| *n > 0);
+    let limit = qparam(query, "limit")
+        .parse::<usize>()
+        .ok()
+        .filter(|n| *n > 0);
     match crate::instance::monitor_db_metrics_filtered(&name, node.as_deref(), limit).await {
-        Ok(items) => (200, "application/json", json!({"ok":true,"items":items}).to_string()),
-        Err(e) => (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Ok(items) => (
+            200,
+            "application/json",
+            json!({"ok":true,"items":items}).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
     }
 }
 
@@ -519,11 +1309,19 @@ pub async fn monitor_dbs(query: &str) -> (u16, &'static str, String) {
 pub async fn monitor_proxies(query: &str) -> (u16, &'static str, String) {
     let name = qparam(query, "instance");
     if name.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少 instance 参数"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 instance 参数"}).to_string(),
+        );
     }
     match crate::instance::monitor_proxies_batch(&name).await {
         Ok(v) => (200, "application/json", v.to_string()),
-        Err(e) => (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
     }
 }
 
@@ -531,11 +1329,23 @@ pub async fn monitor_proxies(query: &str) -> (u16, &'static str, String) {
 pub fn proxy_conf_get(query: &str) -> (u16, &'static str, String) {
     let container = qparam(query, "container");
     if container.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少 container 参数"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 container 参数"}).to_string(),
+        );
     }
     match crate::instance::proxy_conf_get(&container) {
-        Ok(content) => (200, "application/json", json!({"ok":true,"content":content}).to_string()),
-        Err(e) => (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Ok(content) => (
+            200,
+            "application/json",
+            json!({"ok":true,"content":content}).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
     }
 }
 
@@ -544,11 +1354,23 @@ pub async fn proxy_conf_set(query: &str) -> (u16, &'static str, String) {
     let container = qparam(query, "container");
     let content = qparam(query, "content");
     if container.is_empty() || content.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少 container/content 参数"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 container/content 参数"}).to_string(),
+        );
     }
     match crate::instance::proxy_conf_apply(&container, &content).await {
-        Ok(msg) => (200, "application/json", json!({"ok":true,"message":msg}).to_string()),
-        Err(e) => (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Ok(msg) => (
+            200,
+            "application/json",
+            json!({"ok":true,"message":msg}).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
     }
 }
 
@@ -557,8 +1379,16 @@ pub async fn retry_task(query: &str) -> (u16, &'static str, String) {
     let task = qparam(query, "task");
     let node = qparam(query, "node");
     match manager().scheduler.rerun_node(&task, &node).await {
-        Ok(msg) => (200, "application/json", json!({"ok":true,"message":msg}).to_string()),
-        Err(e) => (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Ok(msg) => (
+            200,
+            "application/json",
+            json!({"ok":true,"message":msg}).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
     }
 }
 
@@ -579,58 +1409,142 @@ fn draft_nodes(query: &str) -> Result<Vec<TaskNode>, String> {
         serde_json::from_str(&raw).map_err(|e| format!("nodes 参数解析失败: {e}"))?;
     let mut out = Vec::new();
     for it in arr {
-        let id = it.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        if id.is_empty() { continue; }
-        let name = it.get("name").and_then(|x| x.as_str()).unwrap_or(&id).to_string();
+        let id = it
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let name = it
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or(&id)
+            .to_string();
         let deps: Vec<String> = it
-            .get("deps").and_then(|d| d.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .get("deps")
+            .and_then(|d| d.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
-        let note = it.get("note").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let note = it
+            .get("note")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         let note = if note.is_empty() { name.clone() } else { note };
         out.push(TaskNode {
-            id, name,
+            id,
+            name,
             deps,
             retries: it.get("retries").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
             timeout_secs: it.get("timeout_secs").and_then(|x| x.as_u64()),
             steps: vec![Step::Noop { note }],
         });
     }
-    if out.is_empty() { return Err("nodes 不能为空(每个节点需有 id)".to_string()); }
+    if out.is_empty() {
+        return Err("nodes 不能为空(每个节点需有 id)".to_string());
+    }
     Ok(out)
 }
 pub fn draft_task(query: &str) -> (u16, &'static str, String) {
     let instance = qparam(query, "instance");
     let actor = crate::auth::current_user();
-    let nodes = match draft_nodes(query) { Ok(n) => n, Err(e) => return (400, "application/json", json!({"ok":false,"error":e}).to_string()) };
+    let nodes = match draft_nodes(query) {
+        Ok(n) => n,
+        Err(e) => {
+            return (
+                400,
+                "application/json",
+                json!({"ok":false,"error":e}).to_string(),
+            )
+        }
+    };
     match manager().scheduler.submit_draft(&instance, &actor, nodes) {
-        Ok(tid) => { manager().store.audit(&actor, &instance, "task_draft", &tid, "ok", ""); (200, "application/json", json!({"ok":true,"task_id":tid}).to_string()) }
-        Err(e) => (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Ok(tid) => {
+            manager()
+                .store
+                .audit(&actor, &instance, "task_draft", &tid, "ok", "");
+            (
+                200,
+                "application/json",
+                json!({"ok":true,"task_id":tid}).to_string(),
+            )
+        }
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
     }
 }
 pub async fn start_task(query: &str) -> (u16, &'static str, String) {
     let task = qparam(query, "task");
     let actor = crate::auth::current_user();
     match manager().scheduler.start_draft(&task).await {
-        Ok(msg) => { manager().store.audit(&actor, "", "task_start", &task, "ok", ""); (200, "application/json", json!({"ok":true,"message":msg}).to_string()) }
-        Err(e) => (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Ok(msg) => {
+            manager()
+                .store
+                .audit(&actor, "", "task_start", &task, "ok", "");
+            (
+                200,
+                "application/json",
+                json!({"ok":true,"message":msg}).to_string(),
+            )
+        }
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
     }
 }
 pub fn edit_task(query: &str) -> (u16, &'static str, String) {
     let task = qparam(query, "task");
     let actor = crate::auth::current_user();
-    let nodes = match draft_nodes(query) { Ok(n) => n, Err(e) => return (400, "application/json", json!({"ok":false,"error":e}).to_string()) };
+    let nodes = match draft_nodes(query) {
+        Ok(n) => n,
+        Err(e) => {
+            return (
+                400,
+                "application/json",
+                json!({"ok":false,"error":e}).to_string(),
+            )
+        }
+    };
     match manager().scheduler.edit_draft(&task, nodes) {
-        Ok(()) => { manager().store.audit(&actor, "", "task_edit", &task, "ok", ""); (200, "application/json", json!({"ok":true}).to_string()) }
-        Err(e) => (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Ok(()) => {
+            manager()
+                .store
+                .audit(&actor, "", "task_edit", &task, "ok", "");
+            (200, "application/json", json!({"ok":true}).to_string())
+        }
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
     }
 }
 pub fn delete_task(query: &str) -> (u16, &'static str, String) {
     let task = qparam(query, "task");
     let actor = crate::auth::current_user();
     match manager().scheduler.delete_task(&task) {
-        Ok(()) => { manager().store.audit(&actor, "", "task_delete", &task, "ok", ""); (200, "application/json", json!({"ok":true}).to_string()) }
-        Err(e) => (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Ok(()) => {
+            manager()
+                .store
+                .audit(&actor, "", "task_delete", &task, "ok", "");
+            (200, "application/json", json!({"ok":true}).to_string())
+        }
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
     }
 }
 
@@ -663,16 +1577,30 @@ fn parse_module_steps(query: &str) -> Result<Vec<serde_json::Value>, String> {
 pub fn module_save(query: &str) -> (u16, &'static str, String) {
     let name = qparam(query, "name").trim().to_string();
     if name.is_empty() || name.len() > 96 {
-        return (400, "application/json", json!({"ok":false,"error":"模块名必填且 ≤96 字符"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"模块名必填且 ≤96 字符"}).to_string(),
+        );
     }
     let category = {
         let c = qparam(query, "category").trim().to_string();
-        if c.is_empty() { "other".to_string() } else { c }
+        if c.is_empty() {
+            "other".to_string()
+        } else {
+            c
+        }
     };
     let desc = qparam(query, "desc").trim().to_string();
     let steps = match parse_module_steps(query) {
         Ok(s) => s,
-        Err(e) => return (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Err(e) => {
+            return (
+                400,
+                "application/json",
+                json!({"ok":false,"error":e}).to_string(),
+            )
+        }
     };
     let steps_json = serde_json::to_string(&steps).unwrap_or_else(|_| "[]".to_string());
     let actor = crate::auth::current_user();
@@ -683,9 +1611,14 @@ pub fn module_save(query: &str) -> (u16, &'static str, String) {
     manager()
         .store
         .module_upsert(&name, &category, &desc, &steps_json, &actor, ts);
-    manager()
-        .store
-        .audit(&actor, "", "module_save", &format!("{name} · {steps_json}"), "ok", "");
+    manager().store.audit(
+        &actor,
+        "",
+        "module_save",
+        &format!("{name} · {steps_json}"),
+        "ok",
+        "",
+    );
     (200, "application/json", json!({"ok":true}).to_string())
 }
 
@@ -693,14 +1626,27 @@ pub fn module_save(query: &str) -> (u16, &'static str, String) {
 pub fn module_delete(query: &str) -> (u16, &'static str, String) {
     let name = qparam(query, "name").trim().to_string();
     if name.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少模块名"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少模块名"}).to_string(),
+        );
     }
     let actor = crate::auth::current_user();
     let hit = manager().store.module_delete(&name);
-    manager()
-        .store
-        .audit(&actor, "", "module_delete", &name, if hit { "ok" } else { "miss" }, "");
-    (200, "application/json", json!({"ok":true,"hit":hit}).to_string())
+    manager().store.audit(
+        &actor,
+        "",
+        "module_delete",
+        &name,
+        if hit { "ok" } else { "miss" },
+        "",
+    );
+    (
+        200,
+        "application/json",
+        json!({"ok":true,"hit":hit}).to_string(),
+    )
 }
 
 /// POST /api/rds/module/run?name=&instance= —— 对目标实例一键运行模块(tasks.manage)
@@ -708,11 +1654,23 @@ pub fn module_run(query: &str) -> (u16, &'static str, String) {
     let name = qparam(query, "name").trim().to_string();
     let instance = qparam(query, "instance").trim().to_string();
     if name.is_empty() || instance.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"缺少 name/instance 参数"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"缺少 name/instance 参数"}).to_string(),
+        );
     }
     match manager().run_module(&name, &instance) {
-        Ok(tid) => (200, "application/json", json!({"ok":true,"task_id":tid}).to_string()),
-        Err(e) => (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Ok(tid) => (
+            200,
+            "application/json",
+            json!({"ok":true,"task_id":tid}).to_string(),
+        ),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
     }
 }
 
@@ -723,7 +1681,11 @@ pub fn set_enabled(query: &str) -> (u16, &'static str, String) {
     let enabled = qparam(query, "value").as_str() != "0";
     match manager().set_instance_enabled(&name, enabled) {
         Ok(()) => (200, "application/json", json!({"ok":true}).to_string()),
-        Err(e) => (400, "application/json", json!({"ok":false,"error":e}).to_string()),
+        Err(e) => (
+            400,
+            "application/json",
+            json!({"ok":false,"error":e}).to_string(),
+        ),
     }
 }
 
@@ -735,10 +1697,18 @@ pub fn batch(query: &str) -> (u16, &'static str, String) {
         .filter(|s| !s.is_empty())
         .collect();
     if names.is_empty() {
-        return (400, "application/json", json!({"ok":false,"error":"names 不能为空"}).to_string());
+        return (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"names 不能为空"}).to_string(),
+        );
     }
     let results = manager().batch(&action, &names);
-    (200, "application/json", json!({"ok":true,"results":results}).to_string())
+    (
+        200,
+        "application/json",
+        json!({"ok":true,"results":results}).to_string(),
+    )
 }
 
 // ─── 告警(S-告警) ───
@@ -746,12 +1716,24 @@ pub fn batch(query: &str) -> (u16, &'static str, String) {
 pub fn alerts(query: &str) -> String {
     let opt = |k: &str| {
         let v = qparam(query, k);
-        if v.is_empty() { None } else { Some(v) }
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
     };
-    let limit = qparam(query, "limit").parse::<usize>().unwrap_or(300).clamp(1, 500);
+    let limit = qparam(query, "limit")
+        .parse::<usize>()
+        .unwrap_or(300)
+        .clamp(1, 500);
     let offset = qparam(query, "offset").parse::<usize>().unwrap_or(0);
     // 分页:按过滤条件全量匹配后切片,返回 {alerts, total, offset}
-    let full = manager().alerts(200_000, opt("severity").as_deref(), opt("status").as_deref(), opt("instance").as_deref());
+    let full = manager().alerts(
+        200_000,
+        opt("severity").as_deref(),
+        opt("status").as_deref(),
+        opt("instance").as_deref(),
+    );
     let total = full.len();
     let page: Vec<serde_json::Value> = full.into_iter().skip(offset).take(limit).collect();
     json!({ "alerts": page, "total": total, "offset": offset }).to_string()
@@ -764,7 +1746,11 @@ pub fn alert_action(query: &str) -> (u16, &'static str, String) {
     if ok {
         (200, "application/json", json!({"ok":true}).to_string())
     } else {
-        (400, "application/json", json!({"ok":false,"error":"告警不存在或已关闭"}).to_string())
+        (
+            400,
+            "application/json",
+            json!({"ok":false,"error":"告警不存在或已关闭"}).to_string(),
+        )
     }
 }
 
@@ -796,7 +1782,10 @@ pub fn alert_group_action(query: &str) -> (u16, &'static str, String) {
     let m = manager();
     let open = m.alerts(5000, None, Some("open"), None);
     let groups = crate::insights::group_alerts(&open);
-    let Some(g) = groups.into_iter().find(|g| g["key"].as_str() == Some(key.as_str())) else {
+    let Some(g) = groups
+        .into_iter()
+        .find(|g| g["key"].as_str() == Some(key.as_str()))
+    else {
         return (
             404,
             "application/json",
@@ -907,9 +1896,17 @@ pub fn capacity_forecast(query: &str) -> (u16, &'static str, String) {
 pub fn cancel_task(query: &str) -> (u16, &'static str, String) {
     let id = qparam(query, "task");
     if manager().cancel_task(&id) {
-        (200, "application/json", json!({ "ok": true, "task_id": id }).to_string())
+        (
+            200,
+            "application/json",
+            json!({ "ok": true, "task_id": id }).to_string(),
+        )
     } else {
-        (404, "application/json", json!({ "ok": false, "error": format!("任务 {id} 不存在") }).to_string())
+        (
+            404,
+            "application/json",
+            json!({ "ok": false, "error": format!("任务 {id} 不存在") }).to_string(),
+        )
     }
 }
 
@@ -963,7 +1960,10 @@ pub fn insights(query: &str) -> String {
 pub fn reports_history(query: &str) -> (u16, &'static str, String) {
     let rtype = qparam(query, "type");
     let since = qparam(query, "since").parse::<u64>().unwrap_or(0);
-    let limit = qparam(query, "limit").parse::<usize>().unwrap_or(20).min(100);
+    let limit = qparam(query, "limit")
+        .parse::<usize>()
+        .unwrap_or(20)
+        .min(100);
     let list = manager().store.reports_list(
         if rtype.is_empty() { None } else { Some(&rtype) },
         since,
@@ -993,7 +1993,11 @@ pub fn report_run(query: &str) -> (u16, &'static str, String) {
 pub fn report(query: &str) -> (u16, &'static str, String) {
     let period = {
         let p = qparam(query, "period");
-        if p.is_empty() { "today".to_string() } else { p }
+        if p.is_empty() {
+            "today".to_string()
+        } else {
+            p
+        }
     };
     let m = manager();
     let now = now_secs();
@@ -1041,7 +2045,8 @@ pub async fn query(query: &str, body: &str) -> (u16, &'static str, String) {
         return (
             403,
             "application/json",
-            serde_json::json!({ "ok": false, "error": "权限不足:需要 instances.query" }).to_string(),
+            serde_json::json!({ "ok": false, "error": "权限不足:需要 instances.query" })
+                .to_string(),
         );
     }
     match crate::query::run_query(&instance, &sql, &node, &db).await {
@@ -1080,7 +2085,11 @@ pub fn slow_top(query: &str) -> (u16, &'static str, String) {
     let instance = qparam(query, "instance");
     let (st, v) = crate::slow::top_view(
         &window,
-        if instance.is_empty() { None } else { Some(&instance) },
+        if instance.is_empty() {
+            None
+        } else {
+            Some(&instance)
+        },
         min_count,
         top,
     );
@@ -1133,7 +2142,11 @@ pub fn slow_gov_list(query: &str) -> (u16, &'static str, String) {
     let status = qparam(query, "status");
     let list = manager().store.slow_gov_list(
         200,
-        if status.is_empty() { None } else { Some(&status) },
+        if status.is_empty() {
+            None
+        } else {
+            Some(&status)
+        },
     );
     let masked = !crate::auth::has_perm("instances.query");
     let list: Vec<serde_json::Value> = if masked {
@@ -1164,7 +2177,9 @@ pub fn slow_gov_action(query: &str) -> (u16, &'static str, String) {
             json!({ "ok": false, "error": "需 id 且 action 为 ack/resolve" }).to_string(),
         );
     }
-    let ok = manager().store.slow_gov_action(id, &action, &crate::auth::current_user());
+    let ok = manager()
+        .store
+        .slow_gov_action(id, &action, &crate::auth::current_user());
     if ok {
         manager().store.audit(
             &crate::auth::current_user(),
@@ -1189,7 +2204,11 @@ pub fn slow_gov_action(query: &str) -> (u16, &'static str, String) {
 /// GET /api/rds/backup/reg?instance= —— 节点注册状态视图(instances.view)
 pub fn backup_reg(query: &str) -> (u16, &'static str, String) {
     let instance = qparam(query, "instance");
-    let items = crate::backuplink::reg_view(if instance.is_empty() { None } else { Some(&instance) });
+    let items = crate::backuplink::reg_view(if instance.is_empty() {
+        None
+    } else {
+        Some(&instance)
+    });
     (
         200,
         "application/json",
@@ -1267,13 +2286,15 @@ pub fn query_save(query: &str, body: &str) -> (u16, &'static str, String) {
     let name_ok = |s: &str| {
         !s.is_empty()
             && s.len() <= 64
-            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     };
     if instance.is_empty() || !name_ok(&name) {
         return (
             400,
             "application/json",
-            json!({ "ok": false, "error": "缺少 instance 或名称(name 仅限字母数字-_,≤64)" }).to_string(),
+            json!({ "ok": false, "error": "缺少 instance 或名称(name 仅限字母数字-_,≤64)" })
+                .to_string(),
         );
     }
     if sql.trim().is_empty() {
@@ -1299,8 +2320,19 @@ pub fn query_save(query: &str, body: &str) -> (u16, &'static str, String) {
             json!({ "ok": false, "error": format!("保存失败: {e}") }).to_string(),
         );
     }
-    manager().store.audit(&crate::auth::current_user(), &instance, "query_save", &name, "ok", "");
-    (200, "application/json", json!({ "ok": true, "path": path }).to_string())
+    manager().store.audit(
+        &crate::auth::current_user(),
+        &instance,
+        "query_save",
+        &name,
+        "ok",
+        "",
+    );
+    (
+        200,
+        "application/json",
+        json!({ "ok": true, "path": path }).to_string(),
+    )
 }
 
 /// GET /api/rds/schema/index?instance=&db=&table= —— 真实索引(SHOW INDEX;instances.view)
@@ -1317,7 +2349,11 @@ pub async fn schema_index(query: &str) -> (u16, &'static str, String) {
     }
     match crate::query::index(&instance, &db, &table).await {
         Ok(v) => (200, "application/json", v.to_string()),
-        Err(f) => (f.status, "application/json", json!({ "ok": false, "error": f.message }).to_string()),
+        Err(f) => (
+            f.status,
+            "application/json",
+            json!({ "ok": false, "error": f.message }).to_string(),
+        ),
     }
 }
 
@@ -1326,11 +2362,19 @@ pub async fn schema_routines(query: &str) -> (u16, &'static str, String) {
     let instance = qparam(query, "instance");
     let db = qparam(query, "db");
     if instance.is_empty() {
-        return (400, "application/json", json!({ "ok": false, "error": "缺少 instance 参数" }).to_string());
+        return (
+            400,
+            "application/json",
+            json!({ "ok": false, "error": "缺少 instance 参数" }).to_string(),
+        );
     }
     match crate::query::routines(&instance, &db).await {
         Ok(v) => (200, "application/json", v.to_string()),
-        Err(f) => (f.status, "application/json", json!({ "ok": false, "error": f.message }).to_string()),
+        Err(f) => (
+            f.status,
+            "application/json",
+            json!({ "ok": false, "error": f.message }).to_string(),
+        ),
     }
 }
 

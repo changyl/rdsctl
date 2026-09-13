@@ -1,0 +1,27 @@
+# rdsctl 离线构建供给(仓库内 vendored 依赖)
+#
+# 用途:scripts/build.sh 在离线模式(默认)下会以 CARGO_HOME=<仓库>/.cargo-home 加载本文件,
+#       把 crates.io 源替换为仓库内 vendor/ 目录,使 `cargo build --offline` 真正可用
+#       (不访问网络、不需要 registry 索引)。修复此前"脚本号称离线、实际联网"的缺口。
+#
+# 路径语义(已实测):directory 相对**工作区根**(Cargo.toml 所在目录)解析,
+#       因此从 src/ 等子目录调用 cargo 同样有效。
+#
+# 本目录只需保留本文件:registry/ 缓存不随仓库提交(已清理,零冗余)。
+#
+# 刷新 vendor/(新增或升级依赖时):
+#   ./scripts/build.sh --online                     # 联网解析新依赖
+#   CARGO_HOME=$PWD/.cargo-home CARGO_NET_OFFLINE=false \
+#     cargo vendor --versioned-dirs vendor          # 重新落盘 vendor/ 并提交
+#
+# 说明:`[net] offline = true` 是刻意的安全网 —— 使用本 CARGO_HOME 时永不静默联网;
+#       需要联网请显式走 --online(改用系统 CARGO_HOME),或临时置 CARGO_NET_OFFLINE=false。
+
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+
+[net]
+offline = true

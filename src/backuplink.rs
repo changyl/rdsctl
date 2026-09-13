@@ -45,7 +45,9 @@ fn role_tag(r: crate::instance::Role) -> &'static str {
     match r {
         crate::instance::Role::Master => "master",
         crate::instance::Role::Read => "read",
-        crate::instance::Role::Offline | crate::instance::Role::Stats | crate::instance::Role::Backup => "offline",
+        crate::instance::Role::Offline
+        | crate::instance::Role::Stats
+        | crate::instance::Role::Backup => "offline",
     }
 }
 
@@ -96,7 +98,9 @@ fn ikey(event: &str, instance: &str, node: &str) -> String {
 }
 
 fn enqueue(event: &str, instance: &str, node: &str, key: &str, payload: &str) {
-    manager().store.backup_outbox_enqueue(event, instance, node, key, payload);
+    manager()
+        .store
+        .backup_outbox_enqueue(event, instance, node, key, payload);
 }
 
 /// create/scaleout/destroy 任务成功联动(kind 与既有 scheduler 语义一致)
@@ -119,7 +123,11 @@ pub fn on_task_success(kind: &str, instance: &str) {
         }
         "scaleout" => {
             // 对每个非主节点发 register_node(幂等键=container;老节点已 done 自动去重)
-            for n in i.nodes.iter().filter(|n| n.role != crate::instance::Role::Master) {
+            for n in i
+                .nodes
+                .iter()
+                .filter(|n| n.role != crate::instance::Role::Master)
+            {
                 enqueue(
                     "register_node",
                     instance,
@@ -154,7 +162,9 @@ pub fn on_backup_task_end(instance: &str, task_id: &str, ok: bool) {
             for n in nodes {
                 let out = n["output"].as_str().unwrap_or("");
                 if let Some(p) = out.find("backup-ok bytes=") {
-                    if let Some(rest) = out[p + "backup-ok bytes=".len()..].split_whitespace().next()
+                    if let Some(rest) = out[p + "backup-ok bytes=".len()..]
+                        .split_whitespace()
+                        .next()
                     {
                         bytes = rest.parse().unwrap_or(0);
                     }
@@ -255,11 +265,21 @@ async fn deliver(event: &str, key: &str, payload: &str) -> Delivery {
     let _ = std::fs::write(&pf, payload);
     let out = tokio::process::Command::new("curl")
         .args([
-            "-sS", "-m", &timeout.to_string(), "-X", "POST",
-            "-H", "Content-Type: application/json",
-            "-H", &format!("@{}", hf.display()),
-            "--data-binary", &format!("@{}", pf.display()),
-            "-o", "/dev/null", "-w", "%{http_code}",
+            "-sS",
+            "-m",
+            &timeout.to_string(),
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            &format!("@{}", hf.display()),
+            "--data-binary",
+            &format!("@{}", pf.display()),
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
             &url,
         ])
         .output()
@@ -300,11 +320,17 @@ async fn process_one(row: &Value) {
             if attempts >= MAX_ATTEMPTS {
                 ("dead", 0, format!("连续 {MAX_ATTEMPTS} 次失败,转为 dead"))
             } else {
-                ("pending", now() + backoff_secs(attempts), "可重试失败".to_string())
+                (
+                    "pending",
+                    now() + backoff_secs(attempts),
+                    "可重试失败".to_string(),
+                )
             }
         }
     };
-    manager().store.backup_outbox_mark(id, state, attempts, next_at, &err);
+    manager()
+        .store
+        .backup_outbox_mark(id, state, attempts, next_at, &err);
     // 审计摘要(不含 token/凭据)
     let ok = state == "done";
     manager().store.audit(
@@ -381,7 +407,8 @@ fn reconcile() {
 /// 注册状态视图:以 outbox done 事件为主,叠加实例当前节点清单(instance=none 时全局)
 pub fn reg_view(instance: Option<&str>) -> Vec<Value> {
     let m = manager();
-    let mut map: std::collections::BTreeMap<(String, String), Value> = std::collections::BTreeMap::new();
+    let mut map: std::collections::BTreeMap<(String, String), Value> =
+        std::collections::BTreeMap::new();
     for s in m.store.backup_outbox_reg_state(instance) {
         let inst = s["instance"].as_str().unwrap_or("").to_string();
         let node = s["node"].as_str().unwrap_or("").to_string();
@@ -419,7 +446,10 @@ mod tests {
     #[test]
     fn ikey_sanitizes() {
         assert_eq!(ikey("register_node", "a/b", "c:d"), "register_node-a_b-c_d");
-        assert_eq!(ikey("register_instance", "demo", "master"), "register_instance-demo-master");
+        assert_eq!(
+            ikey("register_instance", "demo", "master"),
+            "register_instance-demo-master"
+        );
     }
 
     #[test]
@@ -452,8 +482,32 @@ mod tests {
             max_tps: 0,
             network: "net".into(),
             nodes: vec![
-                InstNode { container: "m".into(), role: crate::instance::Role::Master, host: "m".into(), port: 3306, host_port: 35001, server_id: 1, region: String::new(), az: String::new(), shard: String::new(), parent: String::new() },
-                InstNode { container: "o".into(), role: crate::instance::Role::Offline, host: "o".into(), port: 3306, host_port: 35002, server_id: 2, region: String::new(), az: String::new(), shard: String::new(), parent: String::new() },
+                InstNode {
+                    container: "m".into(),
+                    role: crate::instance::Role::Master,
+                    host: "m".into(),
+                    port: 3306,
+                    host_port: 35001,
+                    server_id: 1,
+                    region: String::new(),
+                    az: String::new(),
+                    shard: String::new(),
+                    parent: String::new(),
+                    rpc_host_port: 0,
+                },
+                InstNode {
+                    container: "o".into(),
+                    role: crate::instance::Role::Offline,
+                    host: "o".into(),
+                    port: 3306,
+                    host_port: 35002,
+                    server_id: 2,
+                    region: String::new(),
+                    az: String::new(),
+                    shard: String::new(),
+                    parent: String::new(),
+                    rpc_host_port: 0,
+                },
             ],
             proxy_container: "p".into(),
             proxy_mysql_port: 0,

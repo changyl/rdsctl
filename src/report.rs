@@ -150,8 +150,16 @@ fn waterline_line(wl: &Value) -> String {
 fn alert_line(g: &Value) -> String {
     let label = g["label"].as_str().unwrap_or("");
     let sev = g["severity"].as_str().unwrap_or("");
-    let msg: String = g["message"].as_str().unwrap_or("").chars().take(80).collect();
-    format!("  - {label} ×{}({sev}): {msg}", g["count"].as_u64().unwrap_or(0))
+    let msg: String = g["message"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(80)
+        .collect();
+    format!(
+        "  - {label} ×{}({sev}): {msg}",
+        g["count"].as_u64().unwrap_or(0)
+    )
 }
 
 // ─── 生成 ───
@@ -160,7 +168,10 @@ fn alert_line(g: &Value) -> String {
 /// 手动触发不受 RDSCTL_REPORT_ENABLED 限制;扩展段按各自 RDSCTL_REPORT_INCLUDE_* 开关。
 pub fn generate(rtype: &str) -> (u16, Value) {
     let Some((period, _span)) = period_of(rtype) else {
-        return (400, json!({ "ok": false, "error": "rtype 需为 daily|weekly" }));
+        return (
+            400,
+            json!({ "ok": false, "error": "rtype 需为 daily|weekly" }),
+        );
     };
     let m = crate::manager();
     let now = now_secs();
@@ -235,7 +246,8 @@ pub fn generate(rtype: &str) -> (u16, Value) {
     let (text, counts) = render(&base_text, base_counts, &sec_refs, &add_counts);
 
     // 归档(store 内自取 ts;generated_at 以本函数 now 为准)
-    m.store.report_insert(period, rtype, &text, &counts.to_string());
+    m.store
+        .report_insert(period, rtype, &text, &counts.to_string());
     (
         200,
         json!({
@@ -255,7 +267,10 @@ pub fn generate(rtype: &str) -> (u16, Value) {
 fn run_generate(rtype: &str) {
     let (code, out) = generate(rtype);
     if code == 200 {
-        tracing::info!("自动报告({rtype})生成并归档:{}", out["report"]["counts"].to_string());
+        tracing::info!(
+            "自动报告({rtype})生成并归档:{}",
+            out["report"]["counts"].to_string()
+        );
     } else {
         tracing::warn!(
             "自动报告({rtype})生成失败:{}",
@@ -401,7 +416,12 @@ mod tests {
     #[test]
     fn render_tolerates_non_object_base_counts_and_empty_base() {
         // base_counts 非对象(异常/缺省)时兜底为空对象且不 panic
-        let (text, counts) = render("base", json!(null), &[("H", "x"), ("", "")], &[("k", json!(1))]);
+        let (text, counts) = render(
+            "base",
+            json!(null),
+            &[("H", "x"), ("", "")],
+            &[("k", json!(1))],
+        );
         assert_eq!(text, "base\nH\nx");
         assert_eq!(counts["k"], 1);
         assert_eq!(counts.as_object().unwrap().len(), 1);

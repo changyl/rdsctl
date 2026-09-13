@@ -262,12 +262,21 @@ async fn collect_once() {
         let out = match dk::exec_in(&mc.container, &args).await {
             Ok(o) => o,
             Err(e) => {
-                tracing::debug!("容量采样失败 instance={} container={}: {}", inst.name, mc.container, e);
+                tracing::debug!(
+                    "容量采样失败 instance={} container={}: {}",
+                    inst.name,
+                    mc.container,
+                    e
+                );
                 continue;
             }
         };
         let Some((used, total)) = parse_df(&out) else {
-            tracing::debug!("容量采样 df 输出解析失败 instance={} container={}", inst.name, mc.container);
+            tracing::debug!(
+                "容量采样 df 输出解析失败 instance={} container={}",
+                inst.name,
+                mc.container
+            );
             continue;
         };
         samples.push(CapSample {
@@ -287,7 +296,9 @@ async fn collect_once() {
 /// 保留清理(每小时):按 RDSCTL_CAP_RETENTION_DAYS(默认 90)删除过期采样
 fn prune_once() {
     let retention = env_u64("RDSCTL_CAP_RETENTION_DAYS", 90).max(1);
-    let n = manager().store.capacity_prune(now().saturating_sub(retention * 86400));
+    let n = manager()
+        .store
+        .capacity_prune(now().saturating_sub(retention * 86400));
     if n > 0 {
         tracing::info!("容量保留清理:删除 {n} 行采样(保留 {retention} 天)");
     }
@@ -397,7 +408,10 @@ pub fn overview() -> Value {
         let i = e.value();
         let g = groups
             .entry((i.region.clone(), i.shard.clone()))
-            .or_insert(Grp { count: 0, created: now_t });
+            .or_insert(Grp {
+                count: 0,
+                created: now_t,
+            });
         g.count += 1;
         g.created = g.created.min(i.created_at);
     }
@@ -559,8 +573,11 @@ mod tests {
         let (used, total) = parse_df(out).unwrap();
         assert_eq!(used, 52_428_800 * 1024); // 50GiB
         assert_eq!(total, 104_857_600 * 1024); // 100GiB
-        // 无数据行(仅表头)/垃圾 → None
-        assert_eq!(parse_df("Filesystem     1024-blocks      Used Available Capacity Mounted on\n"), None);
+                                               // 无数据行(仅表头)/垃圾 → None
+        assert_eq!(
+            parse_df("Filesystem     1024-blocks      Used Available Capacity Mounted on\n"),
+            None
+        );
         assert_eq!(parse_df("garbage\n"), None);
         assert_eq!(parse_df(""), None);
         // 数据行非数字 → None
@@ -571,7 +588,9 @@ mod tests {
     #[test]
     fn forecast_insufficient_few_samples() {
         // 6 样本(即使跨度足够)→ insufficient
-        let rows: Vec<Value> = (0..6).map(|i| cap_row(1_700_000_000 + i * 86_400, 10 * GIB, 64 * GIB)).collect();
+        let rows: Vec<Value> = (0..6)
+            .map(|i| cap_row(1_700_000_000 + i * 86_400, 10 * GIB, 64 * GIB))
+            .collect();
         let v = forecast_series(&rows);
         assert_eq!(v["insufficient"], true);
         assert_eq!(v["n"], 6);
@@ -582,7 +601,13 @@ mod tests {
     fn forecast_insufficient_short_span() {
         // 8 样本但跨度 42h < 72h → insufficient
         let rows: Vec<Value> = (0..8)
-            .map(|i| cap_row(1_700_000_000 + i * 21_600, 10 * GIB + i * (GIB / 4), 64 * GIB))
+            .map(|i| {
+                cap_row(
+                    1_700_000_000 + i * 21_600,
+                    10 * GIB + i * (GIB / 4),
+                    64 * GIB,
+                )
+            })
             .collect();
         let v = forecast_series(&rows);
         assert_eq!(v["insufficient"], true);

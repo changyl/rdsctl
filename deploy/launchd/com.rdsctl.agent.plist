@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  rdsctl 执行面 agent(launchd;macOS 开发/演练用)
+
+  与 deploy/systemd/rdsctl-agent@.service 等价:agent 崩溃后自动拉起。
+  cluster 模式下每台宿主机(含控制器本机)都要跑一个 agent(设计文档 §9.1)。
+
+  安装:
+    cp deploy/launchd/com.rdsctl.agent.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.rdsctl.agent.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.rdsctl.agent</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/rdsctl/rdsctl</string>
+    <string>agent</string>
+    <string>--port</string>
+    <string>9190</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RDSCTL_AGENT_PORT</key>
+    <string>9190</string>
+    <!-- 生产必须设置为强口令;留空 = 不鉴权(仅 lab) -->
+    <key>RDSCTL_AGENT_TOKEN</key>
+    <string></string>
+    <key>RDSCTL_DATA_DIR</key>
+    <string>/opt/rdsctl/logs/ha/agent</string>
+    <key>RUST_LOG</key>
+    <string>info</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/opt/rdsctl</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <key>StandardOutPath</key>
+  <string>/opt/rdsctl/logs/rdsctl-agent.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/opt/rdsctl/logs/rdsctl-agent.err.log</string>
+</dict>
+</plist>
