@@ -148,7 +148,9 @@ impl std::fmt::Display for LeaseError {
             LeaseError::Quorum => write!(f, "失去多数派,无法获取实例租约"),
             LeaseError::Skew(ms) => write!(
                 f,
-                "实测时钟偏移 {ms}ms 超出上限:拒绝授予新租约(前提 A1;请修 NTP)"
+                "实测时钟偏移 {ms}ms 持续超出上限:拒绝授予新租约(前提 A1)。\
+                 该值已按最小延迟样本过滤并要求持续超界,因此单一网络/调度尖峰不会触发;\
+                 持续如此请修 NTP(/readyz 的 skew_measured_ms 为过滤值,skew_latest_ms 为最新采样)"
             ),
             LeaseError::Internal(m) => write!(f, "租约操作内部错误:{m}"),
         }
@@ -473,8 +475,9 @@ impl ClusterRuntime {
         }
         let ready = reasons.is_empty();
         // 单次取锁完成全部读取:`ready()` 已持有 node guard,再取同锁会自死锁
-        let skew_ms = node
-            .skew_measured_ms()
+        // 注意:一次取锁算完三件事(见发现 0 的死锁教训)
+        let (skew_filtered, skew_latest, skew_n) = node.skew_diag();
+        let skew_ms = skew_filtered
             .map(|v| serde_json::json!(v))
             .unwrap_or(Value::Null);
         let clock_now_ok = node.clock_verified();
@@ -510,6 +513,11 @@ impl ClusterRuntime {
             "log_writable": log_writable,
             "fsync_ok": fsync_ok,
             "skew_measured_ms": skew_ms,
+            // 诊断:最新采样(含单程延迟)与有效样本数。
+            // `skew_measured_ms` 与 `skew_latest_ms` 的差 = 被过滤掉的延迟量级 ⇒
+            // 一眼区分「真 NTP 不同步」与「消息延迟尖峰」(见 docs 发现 22)。
+            "skew_latest_ms": skew_latest.map(|v| serde_json::json!(v)).unwrap_or(Value::Null),
+            "skew_samples": skew_n,
             "premises_ok": premises_ok,
             "premises_unverified": premises_unverified,
             "lab_degraded": lab_degraded,

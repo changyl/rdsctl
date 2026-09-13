@@ -9761,7 +9761,15 @@
 
         // 本副本要点(前提/降级必须显式,不能"看起来就绪")
         var bits = ["本副本角色 <b>" + esc(me.role || "-") + "</b>"];
-        if (me.skew_measured_ms != null) bits.push("实测时钟偏移 <b>" + me.skew_measured_ms + "ms</b>");
+        if (me.skew_measured_ms != null) {
+          bits.push("实测时钟偏移 <b>" + me.skew_measured_ms + "ms</b>(已按最小延迟过滤)");
+        } else if (me.skew_samples === 0) {
+          bits.push("时钟偏移<b>尚无有效采样</b>(A1 未验证)");
+        }
+        if (me.skew_latest_ms != null && me.skew_measured_ms != null &&
+            Math.abs(me.skew_latest_ms - me.skew_measured_ms) >= 50) {
+          bits.push("最近采样 <b>" + me.skew_latest_ms + "ms</b>(含单程延迟,已过滤)");
+        }
         if (me.premises_ok === false) {
           bits.push("前提未验证:<b>" + esc((me.premises_unverified || []).join(", ")) + "</b>(lab 放行 ≠ 已满足)");
         }
@@ -9798,9 +9806,19 @@
           var html = lag == null ? '<span style="color:var(--faint);">-</span>'
             : lag === 0 ? '<span class="pill pill--ok" style="padding:0 7px;font-size:11px;">已追平</span>'
               : '<span class="pill pill--amber" style="padding:0 7px;font-size:11px;">落后 ' + lag + " 条</span>";
+          // 时钟偏移展示两个数:判定值(已按最小延迟过滤)与最新采样(含单程延迟)。
+          // 两者差距大 = 是消息延迟尖峰而不是真的时钟不同步 —— 避免运维被"请修 NTP"带偏。
+          var skew = "";
+          if (p.clock_offset_ms != null) {
+            skew = " · 时钟偏移 " + p.clock_offset_ms + "ms";
+            var lat = p.clock_offset_latest_ms;
+            if (lat != null && Math.abs(lat - p.clock_offset_ms) >= 50) {
+              skew += "(最近采样 " + lat + "ms,含单程延迟)";
+            }
+          }
           return html + '<div class="mono" style="font-size:11px;color:var(--faint);">match=' +
             (p.match_index != null ? p.match_index : "-") + " · 最近 ack " + clAgo(p.last_ack_age_ms) +
-            (p.clock_offset_ms != null ? " · 时钟偏移 " + p.clock_offset_ms + "ms" : "") + "</div>";
+            skew + "</div>";
         }
         var tb = $("#cl-rows");
         tb.innerHTML = "";

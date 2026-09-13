@@ -40,6 +40,21 @@ impl Role {
     }
 }
 
+/// 时钟偏移采样窗口大小(NTP 式最小延迟过滤:延迟恒 ≥ 0,故 `|offset|` 最小的样本最接近真值)
+const CLOCK_SAMPLE_WINDOW: usize = 16;
+/// 采样有效期(ms):过期观测不再参与 A1 判定。
+/// 旧观测不能代表"当前"偏移;过期即视为"未验证"(而不是"超界")。
+const CLOCK_SAMPLE_TTL_MS: u64 = 10_000;
+/// 判定 A1 违规所需的持续超界样本数:单次延迟尖峰不足以判定
+const CLOCK_VIOLATION_MIN_SAMPLES: usize = 2;
+
+/// 一次时钟偏移观测(带本地时刻;时间戳只用于"新鲜度"判定,不参与共识确定性)
+#[derive(Debug, Clone, Copy)]
+pub struct ClockSample {
+    pub offset_ms: i64,
+    pub at_ms: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct RaftConfig {
     pub node_id: String,
@@ -271,8 +286,13 @@ pub struct Node {
     results: BTreeMap<u64, Applied>,
     /// fsync 失败标记:一旦为 false,readyz 必须显式降级(设计 §7.2)
     fsync_ok: bool,
-    /// 对每个 peer 的时钟偏移估计(ms;正=peer 比我快)
-    peer_offset_ms: BTreeMap<String, i64>,
+    /// 对每个 peer 的时钟偏移**采样窗口**(ms;正=peer 比我快)
+    ///
+    /// 为什么是窗口而不是"最近一次":单程延迟会被算进偏移(见 `observe_clock`),
+    /// 只留最近一次等于把任意一次排队尖峰当成真实偏移;而且一旦该 peer 不再发消息,
+    /// 那个尖峰就会被**永久锁死**(实测:n3 因一条被拖慢的选举消息把 1578ms 记成"时钟偏移",
+    /// 此后该节点一直拒绝授予租约,而三副本其实同机、真实偏移只有 2–4ms)。
+    peer_offset_samples: BTreeMap<String, Vec<ClockSample>>,
     rng: u64,
     /// 最后一次快照的 include index/term(用于判断是否需要 InstallSnapshot、校验 prev_term)
     snapshot_index: u64,
@@ -329,7 +349,7 @@ impl Node {
             next_index: BTreeMap::new(),
             match_index: BTreeMap::new(),
             peer_ack_ms: BTreeMap::new(),
-            peer_offset_ms: BTreeMap::new(),
+            peer_offset_samples: BTreeMap::new(),
             results: BTreeMap::new(),
             fsync_ok: true,
             rng,
@@ -392,7 +412,10 @@ impl Node {
                         Value::Null
                     },
                     "last_ack_age_ms": self.peer_ack_ms.get(v).map(|t| now.saturating_sub(*t)),
-                    "clock_offset_ms": self.peer_offset_ms.get(v),
+                    // 判定用值(已按最小延迟过滤)
+                    "clock_offset_ms": self.peer_offset_filtered(v, now),
+                    // 诊断用值:最新一次采样(含单程延迟);与上面的差 = 被过滤掉的延迟量级
+                    "clock_offset_latest_ms": self.peer_offset_latest(v).map(|s| s.offset_ms),
                 })
             })
             .collect()
@@ -1185,34 +1208,110 @@ impl Node {
     /// 记录一次对 peer 的时钟偏移观测。
     ///
     /// 估算口径:`offset ≈ sender_ms - 本地接收时刻`(含单向延迟,通常 ≪ max_skew)。
-    /// 采用"最近一次观测"而非滑动平均:心跳每 300ms 一次,取最近值即可反映当前状态,
-    /// 且时钟被阶跃调整时能快速反映出来。
+    /// 记录一次对 peer 的偏移观测。
+    ///
+    /// **观测值 = 真实时钟偏移 + 这条消息的单程延迟**(延迟恒 ≥ 0),所以单次观测只是偏移的
+    /// **上界**;判定必须靠"窗口 + 最小延迟过滤 + 持续超界",不能靠最近一次(见字段注释)。
     fn observe_clock(&mut self, peer: &str, sender_ms: u64, local_ms: u64) {
         if sender_ms == 0 {
             return; // 老版本/未带时间戳:不参与测量
         }
         let offset = sender_ms as i64 - local_ms as i64;
-        self.peer_offset_ms.insert(peer.to_string(), offset);
-    }
-
-    /// 实测时钟偏移上界(ms)。None = 尚无观测(未测量,**不等于**偏移为 0)。
-    pub fn skew_measured_ms(&self) -> Option<u64> {
-        if self.peer_offset_ms.is_empty() {
-            return None;
+        let w = self
+            .peer_offset_samples
+            .entry(peer.to_string())
+            .or_default();
+        if w.len() >= CLOCK_SAMPLE_WINDOW {
+            w.remove(0);
         }
-        Some(
-            self.peer_offset_ms
-                .values()
-                .map(|v| v.unsigned_abs())
-                .max()
-                .unwrap_or(0),
-        )
+        w.push(ClockSample {
+            offset_ms: offset,
+            at_ms: local_ms,
+        });
     }
 
-    /// 测试钩子:直接注入对某 peer 的偏移观测(用于验证"超界即拒绝授予")
+    /// 某 peer 的**过滤后**偏移估计:在有效期内的样本里取 `|offset|` 最小的那个。
+    ///
+    /// 依据:延迟只会让观测值变大,故最小者最接近真实偏移(NTP 的 clock-filter 思路);
+    /// 而**真实**偏移会出现在窗口内每个样本里,所以不会被滤掉 ——
+    /// 这也是它优于"滑动平均"的地方:平均会被尖峰拉偏,且阶跃式时钟调整要拖很久才反映出来。
+    fn peer_offset_filtered(&self, peer: &str, now: u64) -> Option<i64> {
+        self.peer_offset_samples
+            .get(peer)?
+            .iter()
+            .filter(|s| now.saturating_sub(s.at_ms) <= CLOCK_SAMPLE_TTL_MS)
+            .min_by_key(|s| s.offset_ms.unsigned_abs())
+            .map(|s| s.offset_ms)
+    }
+
+    /// 某 peer 的**最新**采样(含单程延迟;只用于诊断展示,不参与判定)
+    fn peer_offset_latest(&self, peer: &str) -> Option<ClockSample> {
+        self.peer_offset_samples.get(peer)?.last().copied()
+    }
+
+    /// 某 peer 在有效窗口内的 `(超界样本数, 有效样本数)`
+    fn peer_offset_counts(&self, peer: &str, limit: u64, now: u64) -> (usize, usize) {
+        let Some(w) = self.peer_offset_samples.get(peer) else {
+            return (0, 0);
+        };
+        let mut over = 0usize;
+        let mut fresh = 0usize;
+        for s in w {
+            if now.saturating_sub(s.at_ms) <= CLOCK_SAMPLE_TTL_MS {
+                fresh += 1;
+                if s.offset_ms.unsigned_abs() > limit {
+                    over += 1;
+                }
+            }
+        }
+        (over, fresh)
+    }
+
+    /// 实测时钟偏移(ms,**已按最小延迟过滤**)。
+    /// None = 没有**有效期内**的观测(未测量/观测过期,**不等于**偏移为 0)。
+    pub fn skew_measured_ms(&self) -> Option<u64> {
+        self.skew_diag().0
+    }
+
+    /// 诊断视图:`(过滤后上界, 最新采样上界, 有效样本数)`
+    ///
+    /// 两个值的差就是"被过滤掉的单程延迟"量级 —— 运维据此区分
+    /// 「真 NTP 不同步」与「消息延迟尖峰」,不再被一句"请修 NTP"带偏。
+    pub fn skew_diag(&self) -> (Option<u64>, Option<u64>, usize) {
+        let now = self.clock.now_ms();
+        let mut filt: Option<u64> = None;
+        let mut latest: Option<u64> = None;
+        let mut n = 0usize;
+        for peer in self.peer_offset_samples.keys() {
+            if let Some(v) = self.peer_offset_filtered(peer, now) {
+                let a = v.unsigned_abs();
+                filt = Some(filt.map_or(a, |b| b.max(a)));
+            }
+            if let Some(s) = self.peer_offset_latest(peer) {
+                if now.saturating_sub(s.at_ms) <= CLOCK_SAMPLE_TTL_MS {
+                    let a = s.offset_ms.unsigned_abs();
+                    latest = Some(latest.map_or(a, |b| b.max(a)));
+                }
+            }
+            let (_, fresh) = self.peer_offset_counts(peer, self.cfg.max_skew_ms, now);
+            n += fresh;
+        }
+        (filt, latest, n)
+    }
+
+    /// 测试钩子:注入对某 peer 的偏移观测(用于验证"持续超界才拒绝授予")。
+    /// 注入 `CLOCK_VIOLATION_MIN_SAMPLES` 次,表示"这是一个持续存在的偏移"而非单次抖动。
     #[cfg(test)]
     pub fn inject_peer_offset(&mut self, peer: &str, offset_ms: i64) {
-        self.peer_offset_ms.insert(peer.to_string(), offset_ms);
+        let now = self.clock.now_ms();
+        let sender = if offset_ms >= 0 {
+            now.saturating_add(offset_ms as u64)
+        } else {
+            now.saturating_sub(offset_ms.unsigned_abs())
+        };
+        for _ in 0..CLOCK_VIOLATION_MIN_SAMPLES {
+            self.observe_clock(peer, sender, now);
+        }
     }
 
     /// 前提 A1 是否被测量证实(有观测且未超界)
@@ -1225,10 +1324,23 @@ impl Node {
 
     /// 是否已超出允许偏移(必须拒绝授予新租约,设计 §5.4/A1)
     pub fn skew_exceeded(&self) -> bool {
-        match self.skew_measured_ms() {
-            Some(s) => s > self.cfg.max_skew_ms,
-            None => false, // 未测量 ≠ 超界;未测量由"未验证"表述,不伪装成超界
+        let now = self.clock.now_ms();
+        for peer in self.peer_offset_samples.keys() {
+            // ① 判据必须与 `skew_measured_ms()` **同一个值**(过滤后的估计),否则会出现
+            //    "上界只有 20ms 却判定超界"这种自相矛盾(第一版就是这么写的,被 s3/f7 用例抓住)。
+            // ② 至少要有 2 个有效样本:单独一个样本本身也可能被延迟污染,
+            //    不足以下"持续偏移"的结论(反例:n3 曾被一条 1578ms 的选举消息锁死)。
+            let (_, fresh) = self.peer_offset_counts(peer, self.cfg.max_skew_ms, now);
+            if fresh < CLOCK_VIOLATION_MIN_SAMPLES {
+                continue;
+            }
+            if let Some(v) = self.peer_offset_filtered(peer, now) {
+                if v.unsigned_abs() > self.cfg.max_skew_ms {
+                    return true;
+                }
+            }
         }
+        false // 未测量/样本不足 ≠ 超界;前者由"未验证"表述,不伪装成超界
     }
 
     /// 租约授予提案(leader 侧):at_ms 取本节点时钟并随 op 落日志(状态机不读时钟)
@@ -1652,8 +1764,6 @@ mod tests {
     #[test]
     fn restart_preserves_term_and_vote_no_double_vote() {
         let mut c = Cluster::new("restart", 3, 20);
-        // 让 n3 在 term 1 投票给 n1
-        c.node("n1").cfg.node_id.clone();
         let vote = Message::RequestVote {
             term: 1,
             candidate: "n1".into(),
@@ -1992,6 +2102,75 @@ mod tests {
     ///   - 偏移超界时被**实测**发现(`skew_measured_ms` > max_skew),`ready()` 报 `skew_exceeded`;
     ///   - 期间不得出现脑裂(同 term 两个 leader);
     ///   - 偏移恢复后重新变为已验证(可自愈)。
+    /// 发现 22 回归:把**单程延迟**误判成时钟偏移,并且一旦那个 peer 不再发消息就被永久锁死。
+    ///
+    /// 实测事故:三副本同机(真实偏移 2–4ms),n3 因一条被 CPU 抢占拖慢的选举消息把
+    /// **1578ms** 记成"时钟偏移",此后该节点**一直拒绝授予实例租约**,报错还写着"请修 NTP"。
+    #[test]
+    fn delayed_message_is_not_mistaken_for_clock_skew() {
+        let clock = ManualClock::new(1_000_000);
+        let shared: SharedClock = Arc::new(clock.clone());
+        let mut cfg = RaftConfig::new("n1", 0, vec!["n1".into(), "n2".into(), "n3".into()]);
+        cfg.max_skew_ms = 1000;
+        let dir = std::env::temp_dir().join(format!("rdsctl-skew-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut n = Node::open(cfg, &dir, shared).expect("open");
+
+        let now = clock.now_ms();
+        // ① 正常样本(真实偏移 3ms):A1 视为已验证
+        n.observe_clock("n2", now + 3, now);
+        assert_eq!(n.skew_measured_ms(), Some(3));
+        assert!(!n.skew_exceeded(), "正常样本不得判超界");
+        assert!(n.clock_verified());
+
+        // ② 一条被拖慢 1.5s 的消息(延迟被算进观测值):**不得**据此拒发租约
+        n.observe_clock("n2", now + 1503, now);
+        assert_eq!(
+            n.skew_measured_ms(),
+            Some(3),
+            "最小延迟过滤应把 1503ms 的延迟尖峰滤掉,仍报 3ms"
+        );
+        assert!(
+            !n.skew_exceeded(),
+            "单次延迟尖峰不得判 A1 超界(否则会被永久锁死)"
+        );
+        // 但诊断能看见"最新采样很大" ⇒ 运维可区分真偏移与延迟
+        let (filt, latest, samples) = n.skew_diag();
+        assert_eq!(filt, Some(3));
+        assert_eq!(latest, Some(1503), "最新采样如实暴露延迟量级");
+        assert_eq!(samples, 2);
+
+        // ③ 真实持续偏移(每个样本都偏 1500ms)⇒ 必须判超界
+        let clock2 = ManualClock::new(2_000_000);
+        let shared2: SharedClock = Arc::new(clock2.clone());
+        let mut cfg2 = RaftConfig::new("n1", 0, vec!["n1".into(), "n2".into(), "n3".into()]);
+        cfg2.max_skew_ms = 1000;
+        let mut n2 = Node::open(cfg2, &dir, shared2).expect("open");
+        let t = clock2.now_ms();
+        n2.observe_clock("n2", t + 1500, t);
+        assert!(!n2.skew_exceeded(), "只有一个样本时不足以判定(可能是延迟)");
+        n2.observe_clock("n2", t + 1500, t);
+        assert_eq!(n2.skew_measured_ms(), Some(1500));
+        assert!(n2.skew_exceeded(), "持续偏移必须判超界");
+        assert!(!n2.clock_verified(), "超界时 A1 不得标记为已验证");
+
+        // ④ 采样过期 ⇒ 回到"未验证",而不是继续"超界"(旧观测不能代表当前)
+        let ttl = CLOCK_SAMPLE_TTL_MS + 1;
+        let clock3 = ManualClock::new(3_000_000);
+        let shared3: SharedClock = Arc::new(clock3.clone());
+        let mut cfg3 = RaftConfig::new("n1", 0, vec!["n1".into(), "n2".into(), "n3".into()]);
+        cfg3.max_skew_ms = 1000;
+        let mut n3 = Node::open(cfg3, &dir, shared3).expect("open");
+        let t3 = clock3.now_ms();
+        n3.observe_clock("n2", t3 + 1500, t3);
+        n3.observe_clock("n2", t3 + 1500, t3);
+        assert!(n3.skew_exceeded());
+        clock3.advance_ms(ttl);
+        assert!(!n3.skew_exceeded(), "过期观测不得继续判超界");
+        assert_eq!(n3.skew_measured_ms(), None, "过期后回到未测量");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn s3_f7_clock_skew_is_measured_and_degrades() {
         let mut c = Cluster::new("skew", 3, 20);

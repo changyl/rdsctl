@@ -118,7 +118,7 @@ done
 | 单副本崩溃 | 守护已拉起(`systemctl status`)/`/readyz` 恢复 | 无需人工;查日志定位崩溃原因 |
 | 守护未拉起 | `systemctl status` 显示 failed | 查 `RestartPreventExitStatus=2` 是否为前提不达标 → 按 §2 修复;`StartLimitBurst` 触顶需 `systemctl reset-failed` |
 | `/readyz` = `quorum_unavailable` | 失多数派 | 恢复网络/进程;**写会一直失败直到多数派恢复**(这是设计行为,不要绕过) |
-| `/readyz` = `skew_exceeded` | 时钟偏移超限 | 修 NTP;确认节点被摘流量,避免继续授予租约 |
+| `/readyz` = `skew_exceeded` | 时钟偏移**持续**超限(已按最小延迟过滤 + 要求 ≥2 个有效样本) | 先看 `skew_latest_ms`:`skew_measured_ms` 小而 `skew_latest_ms` 很大 = **消息延迟尖峰**(查 CPU/调度/网络,不用动 NTP);两者都大才是真偏移 → 修 NTP。真超界期间该副本会拒绝授予租约(设计行为),确认已摘流量 |
 | `/readyz` = `log_unwritable` | 磁盘满/fsync 失败 | 清盘或换盘;**不要**用 `fsync=never` 类开关硬顶(违背 A2) |
 | 任务出现 `aborted(fence_lost)` | 旧 holder 被接管(fence 拒绝) | 正常信号;确认新 holder 已完成,必要时重提任务(幂等) |
 | 任务出现 `aborted(lease_lost)` | 自身失去租约 | 查该实例是否被其它副本接管;按需重提 |

@@ -33,7 +33,9 @@
 commit/applied/quorum/log_writable/fsync/前提/偏移/uptime/投递计数。
 
 `peers[]`(`src/ha/raft.rs::peers_view`,新增):每个成员一行 ——
-`id / is_self / match_index / next_index / log_last_index / repl_lag / last_ack_age_ms / clock_offset_ms`。
+`id / is_self / match_index / next_index / log_last_index / repl_lag / last_ack_age_ms /
+clock_offset_ms`(判定值,**已按最小延迟过滤**)/ `clock_offset_latest_ms`(最新一次采样,含单程延迟;
+两者之差 = 被过滤掉的延迟量级,用于区分"真时钟不同步"与"消息延迟尖峰",见设计 §19 发现 22)。
 
 - `match_index`/`next_index`/`repl_lag` **只有 leader 维护**,非 leader 返回 `null`(不是 0);
 - `last_ack_age_ms = null` 表示**本进程从未收到过该成员响应**,与"刚刚收到"(0ms)必须区分。

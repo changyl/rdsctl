@@ -9145,7 +9145,6 @@ mod xenon_create {
         let mgr = mem_mgr();
         mgr.create("xn4", &xenon_opts("xn4", 3)).unwrap();
         mgr.set_status("xn4", InstStatus::Running, "");
-        mgr.instances.get("xn4").unwrap().clone();
         // 直接构造销毁 DAG 检查形状(不经真实 docker)
         let inst = mgr.instances.get("xn4").unwrap().clone();
         let nodes = destroy_nodes("xn4", &inst);
