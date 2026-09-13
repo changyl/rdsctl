@@ -765,6 +765,32 @@ sink(元数据库,默认 MySQL,兼容既有页面/报表/慢查/容量表)是**�
     运维据此区分「真 NTP 不同步」与「消息延迟尖峰」,不再被一句"请修 NTP"带偏。
     验收:`ha::raft::tests::delayed_message_is_not_mistaken_for_clock_skew`
     (正常样本→不误判;单次 1503ms 尖峰→不判超界且诊断可见;持续 1500ms→判超界;过期→回到未测量)。
+23. **本副本"收不到 commit":桥接等待占住 tokio worker(现场两次复现后定位并修复)。**
+    现象(用户在真实集群上两次遇到):
+    `租约操作内部错误:租约已提交(index=121)但本副本未在 5000ms 内追平(applied=120, commit=120, leader=Some("n1"))`
+    —— 操作**已经在 leader 上提交**,发起方却在 5s 内一直没学到那条 commit。
+    定位过程与证据:
+    ① 现场把三个副本的 `/internal/status` 与 `/readyz` 拉出来对比:事后已全部追平(index=118),
+       说明不是永久丢失而是**可达数秒的停顿**;
+    ② 两个相关副本的 `transport_errors` 均非 0(= 至少一次投递超过 3s 上限)⇒ 有节点在秒级内不响应;
+    ③ 读代码找到根因:`acquire_lease_blocking` → `bridge_block` 用 `rx.recv_timeout(12s)`
+       **阻塞在 tokio 的 worker 线程上**,而**同一个进程还必须处理 leader 发来的
+       `/internal/raft`(AppendEntries,携带新 commit index)** —— worker 被占住 ⇒ 本副本学不到 commit ⇒
+       已提交的租约操作被判"未追平"。同理,leader 侧的 tick 循环同步 `deliver` 会因慢 peer
+       被拖住(每条上限 3s),心跳停发/延迟,既会引发选举,也会让 follower 迟迟拿不到 commit。
+    已修(两处,都是"共识路径不得被 API 路径饿死"这一原则):
+    ① `bridge_block` 在多线程运行时里改用 **`tokio::task::block_in_place`**(tokio 会临时补充 worker,
+       线程池不被饿死);非运行时线程(单测直接调用)保持原阻塞语义。
+       判据用 `Handle::try_current() + runtime_flavor()==MultiThread`,避免在 current-thread 运行时上 panic。
+    ② tick 循环的**出站投递改为独立任务** + `delivering` in-flight 标记(上一轮没投完就跳过本轮,
+       Raft 对延迟/丢失容错,下一拍重发)⇒ 慢 peer 不再推迟心跳。
+    ③ 诊断:本副本追平超过 1s 就 WARN(`本副本追平租约 index=… 耗时 …ms(applied=…, commit=…)`),
+       下次复现可直接从日志复盘;投递耗时 ≥500ms 也会 WARN(发现 21)。
+    验收:`ha::runtime::tests::bridge_wait_does_not_starve_the_runtime_worker` —— 在**单 worker**
+    多线程运行时里,桥接调用发生在运行时任务内(= 真实情形),要求"等待期间另一个任务仍能被调度";
+    **已验证该用例在去掉修复后必然失败、加回后通过**(避免写出"空判据"的假测试)。
+    这条同时解释了发现 21 记录的那个"未完全定位"的现象(偶发 commit_index 落后 1 条 >2s):
+    它就是本条的轻量表现,5s 容忍只是掩盖,现已按根因修掉。
 
 **实施期发现并已修正的问题**(均记录在案,避免回退):
 

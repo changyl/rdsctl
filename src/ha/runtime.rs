@@ -229,6 +229,8 @@ pub struct ClusterRuntime {
     selfcheck: SelfCheck,
     delivered: std::sync::atomic::AtomicU64,
     transport_errors: std::sync::atomic::AtomicU64,
+    /// tick 循环的出站投递是否在进行中(防止慢 peer 拖住心跳节拍;见 `spawn_background`)
+    delivering: std::sync::atomic::AtomicBool,
 }
 
 impl ClusterRuntime {
@@ -327,6 +329,7 @@ impl ClusterRuntime {
             selfcheck: check,
             delivered: std::sync::atomic::AtomicU64::new(0),
             transport_errors: std::sync::atomic::AtomicU64::new(0),
+            delivering: std::sync::atomic::AtomicBool::new(false),
         });
         Ok(rt)
     }
@@ -346,7 +349,25 @@ impl ClusterRuntime {
                     }
                     outs
                 };
-                me.deliver(outs).await;
+                if outs.is_empty() {
+                    continue;
+                }
+                // **心跳节拍不得被投递拖住**(设计 §19 发现 23):
+                // 单条投递上限是 `DELIVER_TIMEOUT_MS`(3s);若在这里同步等它,一个慢/不可达的
+                // peer 就会把下一拍推到 3s 之后 —— 心跳停发 ⇒ follower 选举超时(600ms~1.2s)
+                // 必然触发 ⇒ 换主 ⇒ 新 leader 同样卡在投递上(选举风暴);
+                // 或者反向:F 收不到新 commit index,实例操作被"未追平"拒掉。
+                // 因此把本轮投递交给独立任务,并用 in-flight 标记防止任务无限堆积
+                // (上一轮还没投完就跳过本轮 —— Raft 对延迟/丢失是容错的,下一拍会重发)。
+                if me.delivering.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                    tracing::debug!("上一轮投递未完成,跳过本轮出站投递(下一拍重发)");
+                    continue;
+                }
+                let me2 = Arc::clone(&me);
+                tokio::spawn(async move {
+                    me2.deliver(outs).await;
+                    me2.delivering.store(false, std::sync::atomic::Ordering::Release);
+                });
             }
         });
     }
@@ -1643,7 +1664,22 @@ impl ClusterRuntime {
         instance: &str,
         index: u64,
     ) -> Option<super::Fence> {
-        self.wait_applied_async(index, LEASE_LOCAL_CATCHUP_MS).await?;
+        let t0 = std::time::Instant::now();
+        let ok = self.wait_applied_async(index, LEASE_LOCAL_CATCHUP_MS).await;
+        let el = t0.elapsed();
+        if el.as_millis() >= 1_000 {
+            // 偏慢就留痕:这类"已提交但本副本追不上"的可用性事故必须能从日志复盘
+            let (applied, commit) = {
+                let n = self.node.lock();
+                (n.applied_index(), n.commit_index())
+            };
+            tracing::warn!(
+                "本副本追平租约 index={index} 耗时 {}ms(applied={applied}, commit={commit}, 成功={})",
+                el.as_millis(),
+                ok.is_some()
+            );
+        }
+        ok?;
         self.lease_fence(instance)
     }
 
@@ -1702,6 +1738,7 @@ impl ClusterRuntime {
                 notes: vec![],
                 all_ok: false,
             },
+            delivering: std::sync::atomic::AtomicBool::new(false),
             delivered: std::sync::atomic::AtomicU64::new(0),
             transport_errors: std::sync::atomic::AtomicU64::new(0),
         }))
@@ -2190,6 +2227,17 @@ fn bridge_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+/// 把"异步共识调用"适配回同步调用点(实例操作是同步 API)。
+///
+/// **关键约束:等待绝不能占住 tokio 的 worker 线程**(设计 §19 发现 23)。
+/// 这个等待最长可达 `LEASE_BRIDGE_TIMEOUT_MS`(12s);如果它就那么 `recv_timeout`,
+/// 那么这个进程的主运行时少一个 worker —— 而同一个进程还**必须**处理
+/// leader 发来的 `/internal/raft`(AppendEntries,携带新的 commit index)。
+/// worker 被占满时,本副本就"收不到 commit":实测表现为
+/// `租约已提交(index=121)但本副本未在 5000ms 内追平(applied=120, commit=120)`,
+/// 实例操作被拒(而且它其实已经提交了)。
+/// 因此:在多线程运行时里用 `block_in_place`(tokio 会临时补充 worker,池子不被饿死);
+/// 非运行时线程(例如直接调用该 API 的单测)照旧阻塞等待。
 fn bridge_block<F, T>(fut: F, timeout: Duration) -> Result<T, LeaseError>
 where
     F: std::future::Future<Output = Result<T, LeaseError>> + Send + 'static,
@@ -2200,9 +2248,20 @@ where
         let out = bridge_runtime().block_on(fut);
         let _ = tx.send(out);
     });
-    match rx.recv_timeout(timeout) {
+    let wait = || rx.recv_timeout(timeout);
+    let in_multi_thread = tokio::runtime::Handle::try_current()
+        .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        .unwrap_or(false);
+    let res = if in_multi_thread {
+        tokio::task::block_in_place(wait)
+    } else {
+        wait()
+    };
+    match res {
         Ok(r) => r,
-        Err(_) => Err(LeaseError::Internal("共识租约请求超时(桥接等待超时)".into())),
+        Err(_) => Err(LeaseError::Internal(
+            "共识租约请求超时(桥接等待超时;等待期间不占 tokio worker)".into(),
+        )),
     }
 }
 
@@ -2516,6 +2575,55 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 发现 23 回归:桥接等待**不得占住 tokio worker**。
+    ///
+    /// 为什么这条重要:等待最长 12s,而同一个进程还必须处理 leader 发来的
+    /// `/internal/raft`(AppendEntries,带新 commit index)。worker 被占住时本副本"收不到 commit",
+    /// 于是已提交的租约操作被报成"未追平"(实测事故:实例操作被拒、可安全重试但用户看到失败)。
+    ///
+    /// 判据:在**单 worker** 的多线程运行时里,用一个"等另一个任务把标志置位"的 future 做桥接。
+    /// 若等待占住 worker,那个任务永远跑不起来 → future 只能超时返回 0。
+    #[test]
+    fn bridge_wait_does_not_starve_the_runtime_worker() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1) // 关键:只有一个 worker,占住就是死
+            .enable_all()
+            .build()
+            .expect("build rt");
+        rt.block_on(async {
+            let during = Arc::new(AtomicBool::new(false));
+            let d2 = Arc::clone(&during);
+            // 关键:桥接调用必须发生在**运行时任务里**(= 真实情况:HTTP handler 中同步调用),
+            // 这样等待才会占住一个 worker。在 `block_on` 的调用线程上直接调则测不出问题。
+            let waiter = tokio::spawn(async move {
+                let r: Result<u32, LeaseError> = bridge_block(
+                    async move {
+                        for _ in 0..400 {
+                            if during.load(Ordering::SeqCst) {
+                                return Ok(1);
+                            }
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                        Ok(0) // 等待期间拿不到 worker:标志始终没被置位
+                    },
+                    Duration::from_millis(5000),
+                );
+                r
+            });
+            // 模拟"必须被调度的 AppendEntries 处理":它跑不动 ⇒ 本副本永远学不到新 commit
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                d2.store(true, Ordering::SeqCst);
+            });
+            let r = waiter.await.expect("join").expect("bridge_block 不应超时");
+            assert_eq!(
+                r, 1,
+                "桥接等待期间其他任务必须能运行(否则本副本无法处理 AppendEntries,表现为\"已提交但未追平\")"
+            );
+        });
+    }
 
     #[test]
     fn member_table_parses_and_rejects_bad_spec() {
