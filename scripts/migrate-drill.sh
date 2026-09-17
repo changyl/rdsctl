@@ -50,7 +50,7 @@ for i in $(seq 1 60); do
   sleep 5
 done
 say "create task=$ST"
-docker exec "$MX" mysql -N -uroot -prds_root_2024 -e \
+docker exec "$MX" sh -c 'exec mysql -N -uroot -p"$MYSQL_ROOT_PASSWORD" -e "$1"' _ \
   "CREATE DATABASE IF NOT EXISTS appdb; CREATE TABLE IF NOT EXISTS appdb.kv (k VARCHAR(64) PRIMARY KEY, v VARCHAR(128)); INSERT INTO appdb.kv VALUES ('mig','ok') ON DUPLICATE KEY UPDATE v='ok';"
 
 say "== 2. migrate_instance → $REGION/$AZ @ $HOST =="
@@ -83,10 +83,10 @@ say "OK: 主/从容器身份全部在线"
 docker ps -a --format '{{.Names}}' | grep -E -- "-rnx|-mgn" && { say "FAIL: 存在临时残留容器"; exit 1; } || say "OK: 无临时残留"
 # 新主可写 + 主写→从读一致
 sleep 4
-docker exec "$MX" mysql -N -uroot -prds_root_2024 -e "INSERT INTO appdb.kv VALUES ('after-mig','ok') ON DUPLICATE KEY UPDATE v='ok';" 2>/dev/null \
+docker exec "$MX" sh -c 'exec mysql -N -uroot -p"$MYSQL_ROOT_PASSWORD" -e "$1"' _ "INSERT INTO appdb.kv VALUES ('after-mig','ok') ON DUPLICATE KEY UPDATE v='ok';" 2>/dev/null \
   || { say "FAIL: 新主不可写"; exit 1; }
 sleep 6
-V=$(docker exec "rds-$NAME-slave-1" mysql -N -uroot -prds_root_2024 -e "SELECT v FROM appdb.kv WHERE k='after-mig'" 2>/dev/null | tr -d '\r')
+V=$(docker exec "rds-$NAME-slave-1" sh -c 'exec mysql -N -uroot -p"$MYSQL_ROOT_PASSWORD" -e "$1"' _ "SELECT v FROM appdb.kv WHERE k='after-mig'" 2>/dev/null | tr -d '\r')
 say "迁移后主写→从读: '$V'"
 [ "$V" = ok ] || { say "FAIL: 迁移后复制未跟上($V)"; exit 1; }
 sleep 3

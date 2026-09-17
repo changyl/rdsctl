@@ -22,6 +22,7 @@ mod backuplink;
 mod capacity;
 mod dag;
 mod docker;
+mod exec;
 mod ha;
 mod http;
 mod insights;
@@ -41,6 +42,15 @@ use instance::RdsManager;
 use store::Store;
 
 static MANAGER: OnceLock<Arc<RdsManager>> = OnceLock::new();
+
+/// 已初始化的全局管理器(**不触发初始化**)。
+///
+/// 用途:执行面抽象层需要「按工作负载反查实例 → 取当前 fence」,但这属于**纯查询**,
+/// 不应因为一次查询就在测试/无关进程里拉起 MySQL 存储。未初始化时返回 None,
+/// 调用方按「无 fence / 无路由信息」处理(等价本机默认后端)。
+pub fn manager_opt() -> Option<&'static Arc<RdsManager>> {
+    MANAGER.get()
+}
 
 /// 全局 RDS 管理器单例(MySQL 持久化;启动恢复:默认中断任务标 failed,
 /// 设 RDSCTL_RESUME_TASKS=1 时改为「续跑」——未终态任务重新入执行,已完成节点不重跑)
@@ -98,6 +108,8 @@ async fn main() -> std::io::Result<()> {
     let mut rpc_port: u16 = 9330;
     let mut node_id = std::env::var("RDSCTL_NODE_ID").unwrap_or_default();
     let mut cluster_spec = std::env::var("RDSCTL_CLUSTER").unwrap_or_default();
+    let mut runtime: Option<String> = None;
+    let mut runtime_cmd: Option<String> = None;
     let mut _shards = std::env::var("RDSCTL_SHARDS").unwrap_or_default();
     let mut roles = std::env::var("RDSCTL_ROLES")
         .unwrap_or_else(|_| "gateway,controller,ingress".to_string());
@@ -194,6 +206,8 @@ async fn main() -> std::io::Result<()> {
                 println!("rdsctl — RDS 管控服务(基于容器)");
                 println!("用法: rdsctl [--port <端口>]             管控服务(默认 9113,单机模式)");
                 println!("      rdsctl agent [--port <端口>]       远端执行 agent(默认 9190)");
+                println!("                      [--runtime docker|external] [--runtime-cmd <绝对路径>]");
+                println!("                                      本机执行后端(平台无关接入;等价 RDSCTL_RUNTIME)");
                 println!("      rdsctl serve --node-id=N1 --cluster=N1@ip:9330,N2@ip:9330,N3@ip:9330");
                 println!("                                     管控面集群模式(见 docs/control-plane-ha-design.md)");
                 println!(
@@ -207,12 +221,40 @@ async fn main() -> std::io::Result<()> {
                     std::env::set_var("RDSCTL_AGENT_TOKEN", v);
                 }
             }
+            // 本机执行后端(agent 模式/单机模式通用;等价 env RDSCTL_RUNTIME/_CMD)
+            "--runtime" => {
+                if let Some(v) = take(&mut args) {
+                    runtime = Some(v);
+                }
+            }
+            "--runtime-cmd" => {
+                if let Some(v) = take(&mut args) {
+                    runtime_cmd = Some(v);
+                }
+            }
             _ => {}
         }
     }
 
+    // 执行后端命令行覆盖(优先于 env)
+    if let Some(r) = runtime.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        std::env::set_var("RDSCTL_RUNTIME", r);
+    }
+    if let Some(c) = runtime_cmd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        std::env::set_var("RDSCTL_RUNTIME_CMD", c);
+    }
+
+    // 启动自检:默认执行后端是否可用(未实现的后端一律 fail-closed,绝不静默回落本机 docker)
+    match exec::preflight_default_runtime().await {
+        Ok(kind) => tracing::info!("执行后端: {kind}"),
+        Err(e) => {
+            eprintln!("执行后端启动自检失败:{e}");
+            std::process::exit(2);
+        }
+    }
+
     if agent_mode {
-        return agent::serve(port).await;
+        return agent::serve(port, exec::default_runtime()).await;
     }
 
     if cluster_mode {
@@ -268,29 +310,60 @@ async fn serve_cluster(
             cfg.election_timeout_ms = (n, n.saturating_mul(2));
         }
     }
+    // 心跳周期(设计 §20 跨区部署:时间参数必须与网络档位同档)。
+    //
+    // 显式给 `RDSCTL_HEARTBEAT_MS` 就用给定值;否则按选举超时**自动收窄**为
+    // `min(300, 选举下限/4)` —— 既有 lab/测试把选举超时压到 400~800ms 却沿用默认心跳 300ms,
+    // 那是"心跳吃掉大半个选举超时"的脆弱配置(跨区必然选主风暴);自动收窄让同档关系
+    // 在既有配置上无痛成立,`single` 模式不读这些参数、行为不变。
+    cfg.heartbeat_ms = match std::env::var("RDSCTL_HEARTBEAT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+    {
+        Some(hb) => hb,
+        None => 300.min(cfg.election_timeout_ms.0 / 4).max(10),
+    };
     let data_dir = std::env::var("RDSCTL_DATA_DIR")
         .unwrap_or_else(|_| format!("./logs/ha/{node_id}"));
     let agent_url = std::env::var("RDSCTL_AGENT_URL").ok();
     let token = std::env::var("RDSCTL_CLUSTER_TOKEN").ok().filter(|s| !s.is_empty());
 
     // 自检先行:失败即拒绝启动(退出码 2)
-    let check = ClusterRuntime::self_check(&cfg, std::path::Path::new(&data_dir), agent_url.as_deref());
+    let check = ClusterRuntime::self_check(
+        &cfg,
+        std::path::Path::new(&data_dir),
+        agent_url.as_deref(),
+        Some(&table),
+        token.as_deref(),
+    );
     if !check.all_ok {
         let allow_clock =
             std::env::var("RDSCTL_PREFLIGHT_ALLOW_UNVERIFIED_CLOCK").as_deref() == Ok("1");
         let allow_agent = std::env::var("RDSCTL_ALLOW_NO_AGENT").as_deref() == Ok("1");
+        let allow_network = std::env::var("RDSCTL_ALLOW_SLOW_NETWORK").as_deref() == Ok("1");
         let structural_ok = check.voters_ok && check.data_dir_ok && check.fsync_ok;
-        let soft_ok = (check.clock_verified || allow_clock) && (check.agent_fence_ok || allow_agent);
+        let soft_ok = (check.clock_verified || allow_clock)
+            && (check.agent_fence_ok || allow_agent)
+            && (check.network_ok || allow_network);
         if !(structural_ok && soft_ok) {
             eprintln!("启动自检未通过,拒绝进入 cluster 模式(退出码 2):");
-            for f in check.blocking_failures(allow_clock, allow_agent) {
+            for f in check.blocking_failures(allow_clock, allow_agent, allow_network) {
                 eprintln!("  - {f}");
+            }
+            // 网络实测细节(A7)对定位"到底多慢"最关键,单独打印
+            for n in check.notes.iter().filter(|n| n.starts_with("A7")) {
+                eprintln!("  · {n}");
             }
             // 已放行但未验证的前提单独提示(不算失败,但必须知情:readyz 会标注)
             let allowed: Vec<String> = check
                 .failures()
                 .into_iter()
-                .filter(|f| !check.blocking_failures(allow_clock, allow_agent).contains(f))
+                .filter(|f| {
+                    !check
+                        .blocking_failures(allow_clock, allow_agent, allow_network)
+                        .contains(f)
+                })
                 .collect();
             if !allowed.is_empty() {
                 eprintln!("已由 lab 开关放行(未验证,readyz 会标注 premises_unverified):");
@@ -298,7 +371,7 @@ async fn serve_cluster(
                     eprintln!("  * {f}");
                 }
             }
-            eprintln!("详见 docs/control-plane-ha-design.md §1.3 与 deploy/README.md §6");
+            eprintln!("详见 docs/control-plane-ha-design.md §1.3/§19 与 deploy/README.md §6");
             std::process::exit(2);
         }
         tracing::warn!(
@@ -331,6 +404,13 @@ async fn serve_cluster(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(50);
+    if tick > rt.heartbeat_ms() / 2 {
+        tracing::warn!(
+            "RDSCTL_HA_TICK_MS={tick} 相对心跳周期({}ms)过粗:tick 循环的实际节拍会把心跳/选举判定\
+             一起拖慢,建议 ≤ 心跳/2(设计 §20 跨区部署)",
+            rt.heartbeat_ms()
+        );
+    }
     rt.spawn_background(tick);
 
     // 注册进程级句柄:此后 RdsManager 的实例互斥权威 = 共识租约(设计 D2)

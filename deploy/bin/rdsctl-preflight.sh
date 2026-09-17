@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # rdsctl 启动前自检(preflight)—— 正确性前提的可执行门禁
 #
-# 依据:docs/control-plane-ha-design.md §1.3(前提 A1–A6)与 §16(M1a 门禁)。
+# 依据:docs/control-plane-ha-design.md §1.3(前提 A1–A7)与 §16(M1a 门禁)。
 # 用法:
 #   deploy/bin/rdsctl-preflight.sh <node-id> [env-file ...]
 #   # systemd 场景由 EnvironmentFile 注入环境,无需手工传 env-file
@@ -9,7 +9,7 @@
 # 退出码约定(与 rdsctl@.service 的 RestartPreventExitStatus=2 对齐):
 #   0 = 前提满足,可启动
 #   2 = 正确性前提不达标 → 拒绝启动(时钟失同步 / fsync 不可信 / 无法形成多数派 /
-#       集群配置非法 / cluster 模式下执行面 agent 不可达)
+#       集群配置非法 / cluster 模式下执行面 agent 不可达 / 网络往返与时间参数不同档)
 #   3 = 用法或配置错误(缺参数、文件不可读、变量缺失)
 #
 # 说明:cluster 模式的**进程内**等价自检由 M1a 在 rdsctl 内实现(见设计文档 §16),
@@ -56,6 +56,7 @@ CLUSTER="${RDSCTL_CLUSTER:-}"
 MAX_SKEW_MS="${RDSCTL_MAX_SKEW_MS:-1000}"
 AGENT_URL="${RDSCTL_AGENT_URL:-}"
 PUBLIC_PORT="${RDSCTL_PORT:-9113}"
+CLUSTER_TOKEN="${RDSCTL_CLUSTER_TOKEN:-}"
 
 say "rdsctl 启动前自检:node=$NODE mode=$MODE data_dir=$DATA_DIR"
 say "----------------------------------------------------------------"
@@ -248,8 +249,101 @@ else
   if [ -n "$AGENT_URL" ]; then ok "agent 已配置:$AGENT_URL(单机模式可选)"; else ok "single 模式:本机直连 docker,agent 可选"; fi
 fi
 
-# ── 6. 公开端口占用 ──
-say "6) 公开端口"
+# ── 6. 网络预算(A7:时间参数必须与实测网络同档) ──
+#
+# 为什么这是一项前提:选举超时是"允许丢几拍心跳"的容错预算。跨区/跨 AZ 部署时单次
+# RPC 往返就可能到数百毫秒,若选举超时(默认 1500ms)没有相应放大,就会表现为心跳
+# 间歇性迟到 ⇒ 频繁误选举 ⇒ 选主风暴(设计 §20 跨区部署)。
+#
+# 判据:election_timeout ≥ 4 × 实测单次 RPC 往返(每 peer 测 5 次取**最小值** = 排队最少;
+# 对端未起时不在此判失败 —— 首启/滚动升级由第 4 项的可达性口径负责)。
+# 取 5 次而不是 3 次:丢包率按 `(5-成功数)/5` 算,3 次下"丢 1 次 = 33%"会把一次瞬时抖动
+# 直接判成部署失败(误伤);5 次时"丢 1 次 = 20%"可在默认阈值内通过。
+rpc_rtt_ms() { # host port → stdout 整数毫秒;失败返回非 0
+  local h="$1" p="$2"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$h" "$p" "$CLUSTER_TOKEN" <<'PY' 2>/dev/null
+import socket, sys, time
+host, port, tok = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+req = "GET /healthz HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n" % host
+if tok:
+    req += "X-Cluster-Token: %s\r\n" % tok
+req += "\r\n"
+s = socket.socket()
+s.settimeout(3)
+t0 = time.time()
+try:
+    s.connect((host, port))
+    s.sendall(req.encode())
+    s.recv(4096)
+finally:
+    s.close()
+print(int((time.time() - t0) * 1000))
+PY
+  elif command -v curl >/dev/null 2>&1; then
+    local out
+    if [ -n "$CLUSTER_TOKEN" ]; then
+      out="$(curl -s -m 3 -o /dev/null -w '%{time_total}' -H "X-Cluster-Token: $CLUSTER_TOKEN" "http://$h:$p/healthz" 2>/dev/null)" || return 1
+    else
+      out="$(curl -s -m 3 -o /dev/null -w '%{time_total}' "http://$h:$p/healthz" 2>/dev/null)" || return 1
+    fi
+    [ -n "$out" ] || return 1
+    # 秒 → 毫秒
+    awk -v t="$out" 'BEGIN{printf "%d", t*1000}'
+  else
+    return 1
+  fi
+}
+
+if [ "$MODE" = "cluster" ] && [ "${VOTERS:-0}" -ge 3 ]; then
+  ELECTION_MIN="${RDSCTL_ELECTION_TIMEOUT_MS:-1500}"
+  BUDGET_MS=$((ELECTION_MIN / 4))
+  MAX_PEER_RTT_MS="${RDSCTL_MAX_PEER_RTT_MS:-0}" # 0 = 不设绝对上限(只看与时间参数的关系)
+  MAX_PEER_LOSS_PCT="${RDSCTL_MAX_PEER_LOSS_PCT:-20}"
+  say "6) 网络预算(A7:选举超时 ${ELECTION_MIN}ms ⇒ 单次 RPC 往返需 ≤ ${BUDGET_MS}ms)"
+  if ! command -v python3 >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then
+    warn "无 python3/curl,未能实测对端 RPC 往返;请人工确认网络延迟与选举超时同档"
+  else
+    for e in "${entries[@]}"; do
+      id="${e%%@*}"; addr="${e#*@}"; h="${addr%:*}"; p="${addr##*:}"
+      [ "$id" = "$NODE" ] && continue
+      best=""; reached=0; probes=5
+      for _ in $(seq 1 "$probes"); do
+        if v="$(rpc_rtt_ms "$h" "$p")"; then
+          reached=$((reached + 1))
+          if [ -z "$best" ] || [ "$v" -lt "$best" ]; then best="$v"; fi
+        fi
+      done
+      if [ "$reached" -eq 0 ]; then
+        warn "peer $id($h:$p) 未响应,跳过网络预算判定(首启/升级期间属预期;上线后必须复测)"
+        continue
+      fi
+      loss=$(((probes - reached) * 100 / probes))
+      if [ "$loss" -gt "$MAX_PEER_LOSS_PCT" ]; then
+        fail "peer $id 丢包率 ${loss}% > ${MAX_PEER_LOSS_PCT}%(5 次探测成功 ${reached} 次):WAN 丢包会直接放大成误选举"
+      fi
+      if [ "$best" -gt "$BUDGET_MS" ]; then
+        fail "peer $id 单次 RPC 往返 ${best}ms > 预算 ${BUDGET_MS}ms(选举超时下限 ${ELECTION_MIN}ms 的四分之一):
+      请把 RDSCTL_ELECTION_TIMEOUT_MS 放大到 ≥ $((best * 4))ms(跨区建议 ≥ $((best * 8))ms);
+      心跳会按 min(300, 选举下限/4) 自动收窄,也可显式设 RDSCTL_HEARTBEAT_MS"
+      else
+        ok "peer $id RPC 往返 ${best}ms ≤ ${BUDGET_MS}ms(五测最小;丢包 ${loss}%)"
+      fi
+      if [ "$MAX_PEER_RTT_MS" -gt 0 ] && [ "$best" -gt "$MAX_PEER_RTT_MS" ]; then
+        fail "peer $id RPC 往返 ${best}ms > RDSCTL_MAX_PEER_RTT_MS=${MAX_PEER_RTT_MS}ms(显式上限)"
+      fi
+    done
+  fi
+else
+  if [ "$MODE" != "cluster" ]; then
+    say "6) 网络预算:跳过(single 模式,无跨节点共识)"
+  else
+    say "6) 网络预算:跳过(集群配置非法,已在第 3 项报错)"
+  fi
+fi
+
+# ── 7. 公开端口占用 ──
+say "7) 公开端口"
 if command -v curl >/dev/null 2>&1 && curl -s -m 2 -o /dev/null "http://127.0.0.1:${PUBLIC_PORT}/login" 2>/dev/null; then
   warn "端口 ${PUBLIC_PORT} 已有服务响应(可能是本机既有 rdsctl 实例;多节点部署请分配不同端口)"
 else

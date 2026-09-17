@@ -9,7 +9,8 @@
 ./scripts/deploy.sh --test         # 部署后追加 P0 验收(单元 + kill-9/并发/巡检 集成)
 ```
 
-完成后打开 http://127.0.0.1:9113/rds (admin/admin)。
+完成后打开 http://127.0.0.1:9113/rds,用 `RDSCTL_USER` / `RDSCTL_PASS` 指定的管理员账号登录
+(**首次登录后立即改密**;凭据不写入本文档)。
 
 ## 各脚本职责
 
@@ -33,8 +34,10 @@
 | 变量 | 默认 | 含义 |
 | --- | --- | --- |
 | `RDSCTL_PORT` | 9113 | HTTP 端口 |
-| `RDSCTL_USER` / `RDSCTL_PASS` | admin/admin | 登录凭据 |
+| `RDSCTL_USER` / `RDSCTL_PASS` | 见 `rdsctl.env.example` | 登录凭据(**首次登录后立即改密**;不在文档中记录具体值) |
 | `RDSCTL_MYSQL_HOST/PORT/USER/PASS/DB` | 127.0.0.1 / 3306 / root / '' / rdsctl | 控制面持久化 MySQL |
+| `RDSCTL_ROOT_PASS` / `RDSCTL_REPL_PASS` | lab 兼容默认值 | **受管实例**的 root / 复制账号口令(生产必须显式设置;轮换需同步既有容器) |
+| `RDSCTL_PROXY_MNG_PASS` | lab 兼容默认值 | newproxy 管理口口令 |
 | `RDSCTL_MYSQL_DATA_DIR` | 仓库内 `.rdsctl-mysql` | 捆绑 MySQL 数据目录 |
 | `RDSCTL_SWEEP_SECS` | 30 | 健康巡检周期 |
 | `RDSCTL_MYSQL_CLI` | PATH 查找 | mysql 客户端路径(验收垫片环境必须显式指定真实路径) |
@@ -44,6 +47,14 @@
 | `RDSCTL_RESUME_TASKS` | 0 | 1=启动续跑(未终态任务重新执行,已完成节点不重跑);0=中断标 failed |
 | `RDSCTL_STORE_BACKEND` | mysql | memory=进程内内存后端(lab/合成;不持久) |
 | `RDSCTL_DEMO_SEED` | 0 | 1=实例库为空时自动种入一批演示实例(带业务线/DBA/版本/规格标签,不起容器;network=demo-* 巡检豁免) |
+| `RDSCTL_RUNTIME` | docker | 执行后端:`docker` / `external`(承载平台抽象,见 `docs/ops-guide-container-platform.md`) |
+| `RDSCTL_CONTAINER_CLI` | docker | docker 驱动的 CLI 名(填 `podman`/`nerdctl` 即接入 CLI 兼容平台,零代码) |
+| `RDSCTL_RUNTIME_CMD` / `_ARGS` / `_CAPS` / `_TIMEOUT_SECS` | 空/空/空/60 | 外部驱动:绝对路径 / 附加参数 / 声明**不支持**的能力 / 单次调用超时 |
+| `RDSCTL_AGENT_TOKEN` | 空 | 远端 agent 鉴权(两端一致;空=不鉴权,仅 lab) |
+
+> 接入其他容器平台(物理机 / podman / k8s / OpenStack / 自研):
+> 先读 `docs/ops-guide-container-platform.md`(30 秒决策表 + 三种接入方式 + 排障);
+> 契约见 `docs/container-platform-abstraction.md`;外部驱动样例见 `scripts/runtime/`。
 
 ## 常见场景
 

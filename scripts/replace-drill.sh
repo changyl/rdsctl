@@ -49,7 +49,7 @@ for i in $(seq 1 60); do
 done
 say "create task=$ST"
 # 主库写一条初始数据
-docker exec "rds-$NAME-master" mysql -N -uroot -prds_root_2024 -e \
+docker exec "rds-$NAME-master" sh -c 'exec mysql -N -uroot -p"$MYSQL_ROOT_PASSWORD" -e "$1"' _ \
   "CREATE DATABASE IF NOT EXISTS appdb; CREATE TABLE IF NOT EXISTS appdb.kv (k VARCHAR(64) PRIMARY KEY, v VARCHAR(128)); INSERT INTO appdb.kv VALUES ('replace','ok') ON DUPLICATE KEY UPDATE v='ok';"
 
 say "== 2. replace_node:把 $SL1 迁到 $HOST =="
@@ -78,9 +78,9 @@ NH=$(req "$CK" "http://127.0.0.1:$PORT/api/rds/instance?name=$NAME" | py "import
 docker ps -a --format '{{.Names}}' | grep -qx "$SL1" && say "OK: 正式容器 $SL1 存在" || { say "FAIL: $SL1 容器缺失"; exit 1; }
 docker ps -a --format '{{.Names}}' | grep -qx "$SL1-rnx" && { say "FAIL: 残留临时容器 $SL1-rnx"; exit 1; } || say "OK: 临时容器已清理"
 # 替换后复制数据一致:主写 → 从读
-docker exec "rds-$NAME-master" mysql -N -uroot -prds_root_2024 -e "INSERT INTO appdb.kv VALUES ('after','replace') ON DUPLICATE KEY UPDATE v='replace';" 2>/dev/null
+docker exec "rds-$NAME-master" sh -c 'exec mysql -N -uroot -p"$MYSQL_ROOT_PASSWORD" -e "$1"' _ "INSERT INTO appdb.kv VALUES ('after','replace') ON DUPLICATE KEY UPDATE v='replace';" 2>/dev/null
 sleep 6
-V=$(docker exec "rds-$NAME-slave-1" mysql -N -uroot -prds_root_2024 -e "SELECT v FROM appdb.kv WHERE k='after'" 2>/dev/null | tr -d '\r')
+V=$(docker exec "rds-$NAME-slave-1" sh -c 'exec mysql -N -uroot -p"$MYSQL_ROOT_PASSWORD" -e "$1"' _ "SELECT v FROM appdb.kv WHERE k='after'" 2>/dev/null | tr -d '\r')
 say "替换后从库读到 k=after -> '$V'"
 [ "$V" = replace ] || { say "FAIL: 替换后复制未跟上($V)"; exit 1; }
 sleep 3

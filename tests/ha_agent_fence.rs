@@ -233,3 +233,71 @@ fn fence_optional_mode_allows_legacy_clients() {
     assert_eq!(st, 409, "只要带了 fence 就必须单调");
     drop(a);
 }
+
+/// 只读 / 变更两类端点在**强制 fence** 模式下的分野。
+///
+/// 这是 cluster 模式「本机也经 agent」的前提:巡检/事实是只读的,在实例租约之外
+/// 拿不到 fence,必须能过;而变更类在无 fence 时必须被拒(否则 A4 形同虚设)。
+#[test]
+fn strict_mode_separates_read_only_from_mutating_endpoints() {
+    let dir = tmp_dir("ro_split");
+    let port = free_port();
+    let mut a = start_agent("ro_split", true, dir, port);
+
+    // ── 只读类:无 fence 也必须放行(巡检靠这些)──
+    let read_calls: &[(&str, &str)] = &[
+        ("/agent/state", r#"{"container":"c1"}"#),
+        ("/agent/health", r#"{"id":"c1"}"#),
+        ("/agent/logs", r#"{"id":"c1","tail":5}"#),
+        ("/agent/exists", r#"{"id":"c1"}"#),
+        // exec_raw = 只读通道(exec_mysql_ro / query_table 走它)
+        ("/agent/exec_raw", r#"{"id":"c1","argv":["mysql","-e","SELECT 1"]}"#),
+    ];
+    for (path, body) in read_calls {
+        let (st, resp) = http(port, "POST", path, Some(body), &[]).expect("请求失败");
+        assert_eq!(st, 200, "{path} 只读类不应因缺 fence 被拒: {resp}");
+        assert!(
+            !resp.contains("fence_required"),
+            "{path} 不应要求 fence: {resp}"
+        );
+    }
+
+    // ── 变更类:无 fence 必须拒绝 ──
+    let mut_calls: &[(&str, &str)] = &[
+        ("/agent/exec", r#"{"container":"c1","args":["sh","-c","true"]}"#),
+        ("/agent/sql", r#"{"container":"c1","user":"root","pass":"p","sql":"SET GLOBAL read_only=ON"}"#),
+        ("/agent/start", r#"{"id":"c1"}"#),
+        ("/agent/network/ensure", r#"{"name":"rds-n1"}"#),
+    ];
+    for (path, body) in mut_calls {
+        let (st, resp) = http(port, "POST", path, Some(body), &[]).expect("请求失败");
+        assert_eq!(st, 409, "{path} 变更类在缺 fence 时必须拒绝: {resp}");
+        assert!(resp.contains("fence_required"), "{path} 应报 fence_required: {resp}");
+    }
+
+    // ── 带上 fence 后,变更类放行 ──
+    let f = "0:7:100";
+    let (st, resp) = http(
+        port,
+        "POST",
+        "/agent/exec",
+        Some(r#"{"container":"c1","args":["sh","-c","true"]}"#),
+        &[("X-Rdsctl-Fence", f)],
+    )
+    .expect("请求失败");
+    assert_eq!(st, 200, "带 fence 的变更应放行: {resp}");
+    assert!(!resp.contains("fence_required"), "{resp}");
+
+    // ── 只读类不受 fence 单调性影响:过期 fence 也不该让读失败 ──
+    let (st, resp) = http(
+        port,
+        "POST",
+        "/agent/state",
+        Some(r#"{"container":"c1"}"#),
+        &[("X-Rdsctl-Fence", "0:1:1")],
+    )
+    .expect("请求失败");
+    assert_eq!(st, 200, "只读类不应被 fence 单调性拒绝: {resp}");
+
+    a.stop();
+}

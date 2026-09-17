@@ -61,9 +61,9 @@ say "切换后 master 容器 = $MASTER"
 
 say "== 5. 直查 MySQL 事实 =="
 echo " 新主 read_only(应为 0):" | tee -a "$LOG"
-docker exec "rds-$NAME-slave-1" mysql -uroot -prds_root_2024 -N -e "SELECT @@read_only" 2>/dev/null | tee -a "$LOG"
+docker exec "rds-$NAME-slave-1" sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "$1"' _ "SELECT @@read_only" 2>/dev/null | tee -a "$LOG"
 echo " 旧主 read_only(应为 1):" | tee -a "$LOG"
-docker exec "rds-$NAME-master" mysql -uroot -prds_root_2024 -N -e "SELECT @@read_only" 2>/dev/null | tee -a "$LOG"
+docker exec "rds-$NAME-master" sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "$1"' _ "SELECT @@read_only" 2>/dev/null | tee -a "$LOG"
 
 say "== 6. 核对登记角色 =="
 req "$CK" "http://127.0.0.1:$PORT/api/rds/instance?name=$NAME" | py "

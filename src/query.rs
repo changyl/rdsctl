@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 use crate::auth;
 use crate::docker as dk;
-use crate::instance::{InstNode, InstStatus, RdsInstance, ROOT_PASS};
+use crate::instance::{root_pass, InstNode, InstStatus, RdsInstance};
 use crate::manager;
 
 // ─── 分类与词法护栏 ───
@@ -558,7 +558,7 @@ async fn provision(container: &str, secret: &str, write: bool) -> Result<(), Str
         }
     }
     sql.push_str("FLUSH PRIVILEGES;");
-    dk::exec_mysql_local(container, "root", ROOT_PASS, &sql).await?;
+    dk::exec_mysql_local(container, "root", root_pass(), &sql).await?;
     Ok(())
 }
 
@@ -620,7 +620,7 @@ pub async fn run_query(
 
     // 3) 账号:专用低权账号;仅显式 RDSCTL_QUERY_ALLOW_ROOT=1(lab)回退 root
     let (user, pass) = if allow_root_fallback() {
-        ("root".to_string(), ROOT_PASS.to_string())
+        ("root".to_string(), root_pass().to_string())
     } else {
         let secret = manager()
             .ensure_query_secret(instance_name)
@@ -861,7 +861,7 @@ pub async fn schema(
     let use_master = container.as_str();
     // 元数据也走只读专用账号(仅授权业务库可见);root 仅用于账号供给
     let (user, pass) = if allow_root_fallback() {
-        ("root".to_string(), ROOT_PASS.to_string())
+        ("root".to_string(), root_pass().to_string())
     } else {
         (ACCT_RO.to_string(), secret)
     };
@@ -1079,7 +1079,7 @@ pub async fn index(
         .await
         .map_err(|e| QueryFail::new(500, format!("查询账号准备失败: {}", redact(&e))))?;
     let (user, pass) = if allow_root_fallback() {
-        ("root".to_string(), ROOT_PASS.to_string())
+        ("root".to_string(), root_pass().to_string())
     } else {
         (ACCT_RO.to_string(), secret)
     };
@@ -1155,7 +1155,7 @@ pub async fn routines(instance_name: &str, db: &str) -> Result<serde_json::Value
         .await
         .map_err(|e| QueryFail::new(500, format!("查询账号准备失败: {}", redact(&e))))?;
     let (user, pass) = if allow_root_fallback() {
-        ("root".to_string(), ROOT_PASS.to_string())
+        ("root".to_string(), root_pass().to_string())
     } else {
         (ACCT_RO.to_string(), secret)
     };

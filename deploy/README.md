@@ -3,6 +3,9 @@
 本目录把设计文档 [docs/control-plane-ha-design.md](../docs/control-plane-ha-design.md) 里的
 **正确性前提**落到可执行的部署物上(前提 A1/A2/A3/A4/A5,见设计 §1.3)。
 
+> 部署视角的两张图(部署架构图 / UML 风格部署图:节点、制品、端口、目录、正确性路径归属)见
+> [docs/deployment-architecture.md](../docs/deployment-architecture.md)。
+
 ## 1. 为什么需要它(而不是"写完就算高可用")
 
 高可用链的最后一环是"**进程崩了有人把它拉回来**":
@@ -132,11 +135,18 @@ RDSCTL_MODE=cluster RDSCTL_NODE_ID=node1 RDSCTL_CLUSTER='...' \
 | 集群成员:奇数 ≥3、格式 `id@ip:port`、id 不重复 | A3 | 不通过 = 拒绝 |
 | 启动时可与自身构成多数派(可达 peer ≥ ⌈N/2⌉−1) | C2 | 不满足 = 拒绝 |
 | 执行面 agent 可达(`/agent/ping`) | A4 | 未配置/不可达 = 拒绝 |
+| **网络预算:每 peer 五次 RPC 往返取最小,须 ≤ 选举超时下限/4;丢包 ≤ `RDSCTL_MAX_PEER_LOSS_PCT`(默认 20%)** | **A7** | 实测超预算 = 拒绝(打印"建议放大到 ≥ N ms");对端全未响应时仅告警(首启/升级) |
 | 公开端口未被占用 | — | 仅告警 |
 
 **lab/演练的显式放行**:本机没有 chrony/timedatectl/ntpq 时(如 macOS)可用
 `RDSCTL_PREFLIGHT_ALLOW_UNVERIFIED_CLOCK=1` 放行时钟检查。此时脚本会打印醒目告警:
 **前提 A1 未验证**,该状态不得用于生产(设计文档 §17.1 R3)。
+网络预算不达标时可用 `RDSCTL_ALLOW_SLOW_NETWORK=1` 放行(**A7 未验证**,`/readyz` 会持续标注)。
+
+> **跨区部署(中国/美东/欧洲)**:先跑第 6 项拿到实测往返,再按 `≥4×(跨区建议 6–8×)` 放大
+> `RDSCTL_ELECTION_TIMEOUT_MS`(心跳不设即自动取 `min(300, 选举下限/4)`),并放大
+> `RDSCTL_SNAPSHOT_DELIVER_MS`。完整口径与仍未落地的阻断项见
+> [docs/control-plane-ha-design.md §20](../docs/control-plane-ha-design.md)。
 
 ## 7. `/healthz` 与 `/readyz` 契约(随 M1a 落地)
 
@@ -153,7 +163,8 @@ RDSCTL_MODE=cluster RDSCTL_NODE_ID=node1 RDSCTL_CLUSTER='...' \
 
 - `ready` = 多数派可达 ∧ 日志可写 ∧ fsync 可信(HTTP 200/503 与之一致);单机模式为 `true`(进程活着即可接流量,与今天一致)。
 - `degraded_reasons` 是**全量**降级原因(可能同时既失多数派又时钟超界),`degraded_reason` 为首要原因;**不允许"看起来就绪"**。
-- `skew_measured_ms` 是**实测值**(来自共识消息携带的发送方时钟,见设计 §5.4),不是配置值;`premises_unverified` 中 `A1_clock` 会随实测结果实时出现/消失。
+- `skew_measured_ms` 是**实测值**(来自共识消息携带的发送方时钟,见设计 §5.4),不是配置值;`premises_unverified` 中 `A1_clock` 会随实测结果实时出现/消失。**注意口径**:该值已按 RTT/2 **剔除单程延迟**(设计 §20.2),`skew_latest_ms` 仍是含延迟的原始上界 —— 两者之差 = 被剔掉的延迟量级。
+- `selfcheck.network_ok` / `premises_unverified: A7_network` 表示"启动期实测的对端 RPC 往返与选举超时不同档"(跨区首要排查项,见设计 §20)。
 - `premises_ok=false` / `lab_degraded=true` 表示"以 lab 放行启动、前提未全部验证"(例如无 NTP、无 agent fence):此时节点仍可接流量,但**必须**在监控里区别对待。
 
 ## 8. 运维要点

@@ -17,7 +17,7 @@ use std::sync::{Mutex, OnceLock};
 use serde_json::{json, Value};
 
 use crate::docker as dk;
-use crate::instance::{InstStatus, RdsManager, Role, ROOT_PASS};
+use crate::instance::{root_pass, InstStatus, RdsManager, Role};
 use crate::manager;
 use crate::query::parse_table;
 use crate::store::{SlowBase, SlowSample};
@@ -298,7 +298,7 @@ async fn digest_selfcheck(container: &str) -> String {
     let cnt = dk::exec_mysql_local(
         container,
         "root",
-        ROOT_PASS,
+        root_pass(),
         "SELECT COUNT(*) FROM performance_schema.events_statements_summary_by_digest",
     )
     .await;
@@ -339,7 +339,7 @@ async fn digest_selfcheck(container: &str) -> String {
     if let Ok(o) = dk::exec_mysql_local(
         container,
         "root",
-        ROOT_PASS,
+        root_pass(),
         "SHOW VARIABLES LIKE 'performance_schema'",
     )
     .await
@@ -351,7 +351,7 @@ async fn digest_selfcheck(container: &str) -> String {
     if let Ok(o) = dk::exec_mysql_local(
         container,
         "root",
-        ROOT_PASS,
+        root_pass(),
         "SHOW VARIABLES LIKE 'performance_schema_digests_size'",
     )
     .await
@@ -363,7 +363,7 @@ async fn digest_selfcheck(container: &str) -> String {
     if let Ok(o) = dk::exec_mysql_local(
         container,
         "root",
-        ROOT_PASS,
+        root_pass(),
         "SELECT COUNT(*) FROM performance_schema.setup_instruments \
          WHERE NAME LIKE 'statement/sql/%' AND ENABLED='NO'",
     )
@@ -422,7 +422,7 @@ fn val_str(v: &Value) -> String {
 }
 
 fn redact(s: &str) -> String {
-    s.replace(ROOT_PASS, "***").chars().take(300).collect()
+    s.replace(root_pass(), "***").chars().take(300).collect()
 }
 
 fn val_u64(v: &Value) -> u64 {
@@ -467,7 +467,7 @@ async fn collect_once() {
             }
         }
         for (container, role) in targets {
-            let out = match dk::query_table(&container, "root", ROOT_PASS, DIGEST_SQL, timeout, "")
+            let out = match dk::query_table(&container, "root", root_pass(), DIGEST_SQL, timeout, "")
                 .await
             {
                 Ok(o) => o,

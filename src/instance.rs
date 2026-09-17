@@ -9,7 +9,7 @@
 // 实例级操作锁:任一生命周期任务提交即占锁,终态释放,拒绝并发操作。
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -35,9 +35,70 @@ const XENON_RPC_PORT: u16 = 8801;
 fn image_of(env_key: &str, def: &str) -> String {
     std::env::var(env_key).unwrap_or_else(|_| def.to_string())
 }
-pub(crate) const ROOT_PASS: &str = "rds_root_2024";
-const REPL_PASS: &str = "rds_repl_2024";
+/// 读取口令类 env(未设置或空 → 回退默认值)。
+///
+/// 空值按"未设置"处理:避免 `RDSCTL_ROOT_PASS=` 这种"配了但配空"把实例静默变成免密。
+fn env_secret(env_key: &str, def: &str) -> String {
+    match std::env::var(env_key) {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => def.to_string(),
+    }
+}
+
+/// 实例 root 口令(env `RDSCTL_ROOT_PASS` 覆盖)。
+///
+/// 默认值仅用于**本地 lab 兼容**(既有容器就是用它建的);生产必须显式注入。
+/// 注意:同一控制面上的所有实例共用该口令,轮换需同步更新既有容器的
+/// `MYSQL_ROOT_PASSWORD`,否则巡检/查询台会连不上老实例。
+pub(crate) fn root_pass() -> &'static str {
+    static V: OnceLock<String> = OnceLock::new();
+    V.get_or_init(|| env_secret("RDSCTL_ROOT_PASS", "rds_root_2024"))
+        .as_str()
+}
+
+/// 复制账号 repl 的口令(env `RDSCTL_REPL_PASS` 覆盖;默认值同样仅为 lab 兼容)。
+fn repl_pass() -> &'static str {
+    static V: OnceLock<String> = OnceLock::new();
+    V.get_or_init(|| env_secret("RDSCTL_REPL_PASS", "rds_repl_2024"))
+        .as_str()
+}
+
+/// newproxy 管理口口令(env `RDSCTL_PROXY_MNG_PASS` 覆盖;默认值仅为 lab 兼容)。
+fn proxy_mng_pass() -> &'static str {
+    static V: OnceLock<String> = OnceLock::new();
+    V.get_or_init(|| env_secret("RDSCTL_PROXY_MNG_PASS", "admin"))
+        .as_str()
+}
+
 pub(crate) const APP_DB: &str = "appdb";
+
+/// 步骤口令解析:**留空 = 使用实例统一 root 口令**(仅 `user=root` 时)。
+///
+/// 目的是让页面上的功能模块模板与用户自定义模块不必明文写口令
+/// (见 `src/rds.html` 的 `MOD_STEP_TYPES`);非 root 用户留空仍按字面空口令处理。
+fn step_pass(user: &str, pass: &str) -> String {
+    if pass.is_empty() && user == "root" {
+        root_pass().to_string()
+    } else {
+        pass.to_string()
+    }
+}
+
+/// 写入类步骤(WriteHostFile)里的口令哨兵。
+///
+/// 任务定义会落库(`task_nodes`)并经 `GET /api/rds/task` 下发给 `tasks.view` 用户,
+/// 所以**步骤内容里不能出现明文口令**:配置模板只写哨兵,真正落盘时才替换为口令
+/// (见 `materialize_secrets`)。副作用:文件内容若原样包含这三个哨兵串会被替换。
+const TOKEN_ROOT_PASS: &str = "__RDSCTL_ROOT_PASSWORD__";
+const TOKEN_REPL_PASS: &str = "__RDSCTL_REPL_PASSWORD__";
+const TOKEN_PROXY_MNG_PASS: &str = "__RDSCTL_PROXY_MNG_PASSWORD__";
+
+/// 把口令哨兵替换为执行期口令(env 可覆盖);无哨兵时原样返回。
+fn materialize_secrets(s: &str) -> String {
+    s.replace(TOKEN_ROOT_PASS, root_pass())
+        .replace(TOKEN_REPL_PASS, repl_pass())
+        .replace(TOKEN_PROXY_MNG_PASS, proxy_mng_pass())
+}
 
 /// 实例状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -476,24 +537,117 @@ impl NodeRoute {
             NodeRoute::Unmanaged { .. } => "unmanaged",
         }
     }
+
+    /// 本路由对应的执行后端(平台无关执行面)。`Unmanaged` → fail-closed。
+    pub fn runtime(
+        &self,
+    ) -> Result<Arc<dyn crate::exec::WorkloadRuntime>, crate::exec::RuntimeError> {
+        runtime_of_route(self)
+    }
 }
 
-// ─── 按路由的容器/MySQL 原语(本机 dk::* ↔ 远端 agent 同语义) ───
+/// 路由 → 执行后端(平台无关执行面,见 docs/container-platform-abstraction.md):
+///   本机      → 进程默认后端(`RDSCTL_RUNTIME`,默认 docker CLI)
+///   远端 agent → AgentRuntime(平台由 agent 侧决定)
+///   管理盲区   → Err(fail-closed,不在本机代跑)
+pub fn runtime_of_route(
+    route: &NodeRoute,
+) -> Result<Arc<dyn crate::exec::WorkloadRuntime>, crate::exec::RuntimeError> {
+    match route {
+        // cluster 模式下本机也经 agent(设计 §9.1/A4:取消 `Local` 直连特权路径,
+        // 否则 fence 只在部分步骤被强制,执行面等于有后门)。
+        NodeRoute::Local => match local_agent() {
+            Some(ag) => Ok(Arc::new(crate::exec::agent::AgentRuntime::new(ag))),
+            None => Ok(crate::exec::default_runtime()),
+        },
+        NodeRoute::Agent { ag, .. } => Ok(Arc::new(crate::exec::agent::AgentRuntime::new(ag.clone()))),
+        NodeRoute::Unmanaged { host } => Err(crate::exec::RuntimeError::NodeNotReady(format!(
+            "节点绑定宿主机 {host} 但 agent 未接入,无法执行(不代跑本机)"
+        ))),
+    }
+}
+
+/// 是否应把「本机」操作也交给 agent。纯函数,便于单测。
+///
+/// 判据(cluster 模式 + 配置了 `RDSCTL_AGENT_URL`)与 `exec_agent` 一致:
+/// 只有 cluster 模式才取消 `Local` 直连特权 —— 单机模式保持历史行为不变。
+fn should_use_local_agent(cluster_active: bool, agent_url: Option<&str>) -> bool {
+    cluster_active && agent_url.map(|u| !u.trim().is_empty()).unwrap_or(false)
+}
+
+/// cluster 模式下本机 agent 句柄(未配置/非 cluster 模式 → None)
+fn local_agent() -> Option<crate::agent::Agent> {
+    let url = std::env::var("RDSCTL_AGENT_URL").ok();
+    if !should_use_local_agent(crate::ha::runtime::global().is_some(), url.as_deref()) {
+        return None;
+    }
+    Some(crate::agent::Agent::new(
+        url?,
+        crate::agent::token_opt(),
+    ))
+}
+
+/// 解析某工作负载在当前实例下的执行路由(exec_step / 网络的统一入口)。
+/// 实例不存在时回落本机,与既有 `unwrap_or(NodeRoute::Local)` 行为一致。
+fn step_route(instance: &str, container: &str) -> NodeRoute {
+    let mgr = crate::manager();
+    mgr.instances
+        .get(instance)
+        .map(|i| i.value().clone())
+        .map(|i| resolve_route_of(&i, container, &mgr.store.host_list()))
+        .unwrap_or(NodeRoute::Local)
+}
+
+/// 实例级步骤(网络创建/删除)的执行路由。
+///
+/// 网络是实例内所有节点共享的资源,判据:
+///   - 有任一节点未绑定 → **本机**(与创建/扩容流程一致:新节点就是在本机起的);
+///   - 全部绑定且同一台宿主机 → 该宿主机(全量迁移后的实例,网络在目标机上建);
+///   - 绑定到多台宿主机 → 本机 + 告警(跨宿主机 docker 网络本就无法共享,
+///     保持改造前行为,且避免半迁移过程中把网络悄悄建到远端)。
+fn instance_exec_route(instance: &str) -> NodeRoute {
+    let mgr = crate::manager();
+    let Some(inst) = mgr.instances.get(instance).map(|i| i.value().clone()) else {
+        return NodeRoute::Local;
+    };
+    if inst.nodes.is_empty() {
+        return NodeRoute::Local;
+    }
+    let mut host: Option<&str> = None;
+    for n in &inst.nodes {
+        match inst.node_hosts.get(&n.container) {
+            None => return NodeRoute::Local,
+            Some(h) => match host {
+                None => host = Some(h.as_str()),
+                Some(prev) if prev == h.as_str() => {}
+                Some(_) => {
+                    tracing::warn!(
+                        "实例 {instance} 的节点分布在不同宿主机,网络步骤按本机执行(跨宿主机 docker 网络不共享)"
+                    );
+                    return NodeRoute::Local;
+                }
+            },
+        }
+    }
+    let hosts = mgr.store.host_list();
+    resolve_route_of(&inst, &inst.nodes[0].container, &hosts)
+}
+
+// ─── 按路由的容器/MySQL 原语(统一走平台无关执行面;见 runtime_of_route) ───
 
 async fn r_exists(r: &NodeRoute, container: &str) -> bool {
-    match r {
-        NodeRoute::Local => dk::exists(container).await,
-        NodeRoute::Agent { ag, .. } => ag.exists(container).await,
-        NodeRoute::Unmanaged { .. } => false,
+    match runtime_of_route(r) {
+        Ok(rt) => rt.exists(container).await,
+        Err(_) => false,
     }
 }
 
 async fn r_state(r: &NodeRoute, container: &str) -> Option<String> {
-    match r {
-        NodeRoute::Local => dk::container_state(container).await,
-        NodeRoute::Agent { ag, .. } => ag.container_state(container).await,
-        NodeRoute::Unmanaged { .. } => None,
-    }
+    runtime_of_route(r)
+        .ok()?
+        .state(container)
+        .await
+        .map(|s| s.wire())
 }
 
 async fn r_sql(
@@ -503,11 +657,30 @@ async fn r_sql(
     pass: &str,
     sql: &str,
 ) -> Result<String, String> {
-    match r {
-        NodeRoute::Local => dk::exec_mysql_local(container, user, pass, sql).await,
-        NodeRoute::Agent { ag, .. } => ag.exec_mysql_local(container, user, pass, sql).await,
-        NodeRoute::Unmanaged { .. } => Err("节点绑定宿主机但 agent 未接入,无法执行".to_string()),
-    }
+    let rt = r.runtime().map_err(|e| e.to_string())?;
+    rt.exec_mysql_local(container, user, pass, sql)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// **只读** SQL(巡检 / 事实 / 证据快照)。
+///
+/// 与 `r_sql` 的 SQL 文本相同,但经执行面 `exec_mysql_ro` 落地 —— agent 侧
+/// `exec_raw` 属只读类(不要求 fence),因此巡检在实例**租约之外**也能经 agent 工作
+/// (cluster 模式下本机也走 agent,见 runtime_of_route)。
+/// 边界:凡会改数据的 SQL(`SET GLOBAL`/`CHANGE REPLICATION SOURCE`/`STOP REPLICA`…)
+/// 必须用 `r_sql`,否则等于绕过 fence 强制点。
+async fn r_sql_ro(
+    r: &NodeRoute,
+    container: &str,
+    user: &str,
+    pass: &str,
+    sql: &str,
+) -> Result<String, String> {
+    let rt = r.runtime().map_err(|e| e.to_string())?;
+    rt.exec_mysql_ro(container, user, pass, sql)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 节点级健康探测(按路由;与巡检语义一致,见 sweep_once)
@@ -528,7 +701,7 @@ async fn probe_node(r: &NodeRoute, n: &InstNode) -> (String, Option<String>) {
             Some(format!("节点 {} 服务已停止({st0})", n.container)),
         );
     }
-    if r_sql(r, &n.container, "root", ROOT_PASS, "SELECT 1")
+    if r_sql_ro(r, &n.container, "root", root_pass(), "SELECT 1")
         .await
         .is_err()
     {
@@ -578,7 +751,7 @@ async fn probe_xenon_node(r: &NodeRoute, n: &InstNode) -> (String, Option<String
             Some(format!("节点 {} 服务已停止({st0})", n.container)),
         );
     }
-    if r_sql(r, &n.container, "root", ROOT_PASS, "SELECT 1")
+    if r_sql_ro(r, &n.container, "root", root_pass(), "SELECT 1")
         .await
         .is_err()
     {
@@ -590,16 +763,14 @@ async fn probe_xenon_node(r: &NodeRoute, n: &InstNode) -> (String, Option<String
     ("ok".to_string(), None)
 }
 
-// ─── 按路由的容器写原语(本机 dk::* ↔ 远端 agent 同语义;replace_node 等工作流用) ───
+// ─── 按路由的容器写原语(replace_node 等工作流用;统一走平台无关执行面) ───
 
 async fn r_run(r: &NodeRoute, container: &str, args: &[&str]) -> Result<(), String> {
-    match r {
-        NodeRoute::Local => dk::run(container, args).await,
-        NodeRoute::Agent { ag, .. } => ag.run(container, args).await,
-        NodeRoute::Unmanaged { host } => {
-            Err(format!("节点绑定宿主机 {host},agent 未接入,无法执行"))
-        }
-    }
+    let rt = r.runtime().map_err(|e| e.to_string())?;
+    let spec = crate::exec::spec::docker_args_to_spec(container, args).map_err(|e| e.to_string())?;
+    rt.create(&spec, &crate::exec::ExecMeta::none())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 删除容器(不存在则忽略;幂等)
@@ -607,24 +778,18 @@ async fn r_rm(r: &NodeRoute, container: &str) -> Result<(), String> {
     if !r_exists(r, container).await {
         return Ok(());
     }
-    match r {
-        NodeRoute::Local => dk::rm(container).await,
-        NodeRoute::Agent { ag, .. } => ag.rm(container).await,
-        NodeRoute::Unmanaged { host } => {
-            Err(format!("节点绑定宿主机 {host},agent 未接入,无法执行"))
-        }
-    }
+    let rt = r.runtime().map_err(|e| e.to_string())?;
+    rt.remove(container, false, &crate::exec::ExecMeta::none())
+        .await
+        .map_err(|e| e.to_string())
 }
 
-/// docker rename
+/// 重命名工作负载(身份=容器名不变的关键步骤,见 replace_node)
 async fn r_rename(r: &NodeRoute, from: &str, to: &str) -> Result<(), String> {
-    match r {
-        NodeRoute::Local => dk::docker(&["rename", from, to]).await.map(|_| ()),
-        NodeRoute::Agent { ag, .. } => ag.docker(&["rename", from, to]).await.map(|_| ()),
-        NodeRoute::Unmanaged { host } => {
-            Err(format!("节点绑定宿主机 {host},agent 未接入,无法执行"))
-        }
-    }
+    let rt = r.runtime().map_err(|e| e.to_string())?;
+    rt.rename(from, to, &crate::exec::ExecMeta::none())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 轮询容器内 MySQL 就绪(按路由)
@@ -637,7 +802,7 @@ async fn wait_mysql_route(
 ) -> Result<(), String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     while std::time::Instant::now() < deadline {
-        if r_sql(r, container, user, pass, "SELECT 1").await.is_ok() {
+        if r_sql_ro(r, container, user, pass, "SELECT 1").await.is_ok() {
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -783,6 +948,11 @@ impl RdsManager {
     /// 探测式宿主端口分配:自 next_port 起逐个检查 127.0.0.1 端口可绑定,跳过已被占用
     /// (ssh 隧道转发 / 既有容器映射 / 其它进程)的端口,避免 docker 端口冲突导致任务失败。
     fn alloc_host_port(&self) -> u16 {
+        // 显式避让「已被任一已知实例声明」的端口。
+        // 端口水位只保证新分配高于**本进程启动时**记录的端口;cluster 模式下各副本各有
+        // 水位、实例记录又可能来自其它副本(经 sink 回灌),只靠水位仍会撞车。
+        // 仅在创建/扩容这类低频路径调用,不在巡检热路径。
+        let taken = self.declared_ports();
         loop {
             let p = self.next_port.fetch_add(1, Ordering::Relaxed);
             if p >= 60_000 {
@@ -794,11 +964,51 @@ impl RdsManager {
             if p16 < 35_000 {
                 continue;
             }
+            if taken.contains(&p16) {
+                continue; // 已被某实例声明(即使当前无人监听)
+            }
             if host_port_free(p16) {
                 return p16;
             }
             // 占用则继续取下一端口(计数已自增)
         }
+    }
+
+    /// 本进程已知的全部已分配宿主端口(节点 / RPC / 代理 / 接入层)。
+    ///
+    /// 用于 `alloc_host_port` 的显式避让 —— 判断依据是**实例记录**而非「当前能否
+    /// bind」:端口所属容器可能已停止或所属副本已重启,此时 bind 探测会误判为空闲。
+    fn declared_ports(&self) -> std::collections::HashSet<u16> {
+        let mut s = std::collections::HashSet::new();
+        for e in self.instances.iter() {
+            let i = e.value();
+            for n in &i.nodes {
+                if n.host_port > 0 {
+                    s.insert(n.host_port);
+                }
+                if n.rpc_host_port > 0 {
+                    s.insert(n.rpc_host_port);
+                }
+            }
+            for p in &i.proxies {
+                if p.mysql_port > 0 {
+                    s.insert(p.mysql_port);
+                }
+                if p.mng_port > 0 {
+                    s.insert(p.mng_port);
+                }
+            }
+            if i.lvs_mysql_port > 0 {
+                s.insert(i.lvs_mysql_port);
+            }
+            if i.proxy_mysql_port > 0 {
+                s.insert(i.proxy_mysql_port);
+            }
+            if i.proxy_mng_port > 0 {
+                s.insert(i.proxy_mng_port);
+            }
+        }
+        s
     }
 
     // ─── 查询 ───
@@ -2305,7 +2515,7 @@ impl RdsManager {
             proxy_mysql_port: proxy0_mysql,
             proxy_mng_port: proxy0_mng,
             created_at: now(),
-            root_password: ROOT_PASS.to_string(),
+            root_password: root_pass().to_string(),
             query_secret: String::new(),
             last_error: String::new(),
         };
@@ -2476,7 +2686,7 @@ impl RdsManager {
             proxy_mysql_port: proxy0_mysql,
             proxy_mng_port: proxy0_mng,
             created_at: now(),
-            root_password: ROOT_PASS.to_string(),
+            root_password: root_pass().to_string(),
             query_secret: String::new(),
             last_error: String::new(),
         };
@@ -2493,7 +2703,7 @@ impl RdsManager {
     // 管控差异(vs 主从架构):
     //   - 无 proxy/LVS 接入层,无 MySQL 复制链;业务可直连任一节点 MySQL 宿主端口。
     //   - 高可用由 xenon raft 内建(leader 选举/自动故障转移),管控面不启用 orchestrator ERS。
-    //   - root 口令沿用实例统一 ROOT_PASS(entrypoint MYSQL_ROOT_PASSWORD),巡检/查询台语义不变。
+    //   - root 口令沿用实例统一口令(env RDSCTL_ROOT_PASS;entrypoint MYSQL_ROOT_PASSWORD),巡检/查询台语义不变。
     fn build_xenon_inst(
         &self,
         name: &str,
@@ -2572,7 +2782,7 @@ impl RdsManager {
                     Step::WaitMysql {
                         container: c.clone(),
                         user: "root".into(),
-                        pass: ROOT_PASS.into(),
+                        pass: String::new(), // 留空 = 执行时取实例统一口令(不落盘/不下发,见 step_pass)
                         timeout_secs: 300,
                     },
                 ],
@@ -2745,7 +2955,7 @@ impl RdsManager {
             proxy_mysql_port,
             proxy_mng_port,
             created_at: now(),
-            root_password: ROOT_PASS.to_string(),
+            root_password: root_pass().to_string(),
             query_secret: String::new(),
             last_error: String::new(),
         };
@@ -4148,7 +4358,7 @@ impl RdsManager {
                 proxy_mysql_port: proxies[0].mysql_port,
                 proxy_mng_port: proxies[0].mng_port,
                 created_at: now - (ROWS.len() as u64 - i as u64) * 3600,
-                root_password: ROOT_PASS.to_string(),
+                root_password: root_pass().to_string(),
                 query_secret: String::new(),
                 last_error: String::new(),
             };
@@ -4235,11 +4445,19 @@ impl RdsManager {
             }
             for n in &i.nodes {
                 max_port = max_port.max(n.host_port as u64);
+                // 端口水位必须覆盖**所有**会占用宿主端口的字段,否则重启后
+                // `next_port` 会从低于这些端口的位置起步,把仍被旧实例声明的端口
+                // 重新分配出去(实测类故障:接入层/代理端口 EADDRINUSE)。
+                max_port = max_port.max(n.rpc_host_port as u64);
                 max_sid = max_sid.max(n.server_id);
             }
             max_port = max_port
                 .max(i.proxy_mysql_port as u64)
-                .max(i.proxy_mng_port as u64);
+                .max(i.proxy_mng_port as u64)
+                .max(i.lvs_mysql_port as u64);
+            for p in &i.proxies {
+                max_port = max_port.max(p.mysql_port as u64).max(p.mng_port as u64);
+            }
             self.instances.insert(name, i);
         }
         // 端口/自增 id 从已加载实例之后继续,避免重启后新实例与存活实例端口冲突
@@ -4357,7 +4575,7 @@ impl RdsManager {
                 } else {
                     inst.proxy_mysql_port
                 };
-                match dk::host_mysql(probe_port, "root", ROOT_PASS, "SELECT 1").await {
+                match dk::host_mysql(probe_port, "root", root_pass(), "SELECT 1").await {
                     Ok(_) => {}
                     Err(e) => {
                         problems.push(if via_vip {
@@ -4452,7 +4670,7 @@ impl RdsManager {
             }
             let probe_port = if via_vip { inst.lvs_mysql_port } else { inst.proxy_mysql_port };
             if probe_port > 0 {
-                if let Err(e) = dk::host_mysql(probe_port, "root", ROOT_PASS, "SELECT 1").await {
+                if let Err(e) = dk::host_mysql(probe_port, "root", root_pass(), "SELECT 1").await {
                     problems.push(if via_vip {
                         format!(
                             "接入层 VIP 127.0.0.1:{probe_port} 不可达(可直连代理 :{} 复核): {e}",
@@ -4524,7 +4742,7 @@ async fn replica_problem_route(r: &NodeRoute, container: &str) -> Option<String>
                WHERE CHANNEL_NAME='' AND SERVICE_STATE='ON') \
                AND EXISTS(SELECT 1 FROM performance_schema.replication_applier_status \
                WHERE CHANNEL_NAME='' AND SERVICE_STATE='ON'),'OK','STOPPED')";
-    match r_sql(r, container, "root", ROOT_PASS, sql).await {
+    match r_sql_ro(r, container, "root", root_pass(), sql).await {
         Ok(o) if o.trim() == "OK" => None,
         Ok(_) => Some(format!("从库 {container} 复制中断(IO/SQL 线程未运行)")),
         Err(e) => Some(format!("从库 {container} 复制状态查询失败: {e}")),
@@ -4587,7 +4805,7 @@ async fn capture_degrade_evidence(inst: &RdsInstance, hosts: &[serde_json::Value
         }
     }
     // 代理连通
-    let proxy = match dk::host_mysql(inst.proxy_mysql_port, "root", ROOT_PASS, "SELECT 1").await {
+    let proxy = match dk::host_mysql(inst.proxy_mysql_port, "root", root_pass(), "SELECT 1").await {
         Ok(o) => serde_json::json!({
             "mysql_port": inst.proxy_mysql_port, "reachable": true, "select1": o.trim() }),
         Err(e) => {
@@ -4614,24 +4832,24 @@ async fn capture_degrade_evidence(inst: &RdsInstance, hosts: &[serde_json::Value
             slaves.push(rec);
             continue;
         }
-        match r_sql(route, &n.container, "root", ROOT_PASS, "SELECT 1").await {
+        match r_sql_ro(route, &n.container, "root", root_pass(), "SELECT 1").await {
             Ok(_) => {
                 rec["reachable"] = serde_json::json!(true);
-                let conn = r_sql(route, &n.container, "root", ROOT_PASS, EVIDENCE_SQL_CONN)
+                let conn = r_sql_ro(route, &n.container, "root", root_pass(), EVIDENCE_SQL_CONN)
                     .await
                     .unwrap_or_default();
-                let app = r_sql(route, &n.container, "root", ROOT_PASS, EVIDENCE_SQL_APPLIER)
+                let app = r_sql_ro(route, &n.container, "root", root_pass(), EVIDENCE_SQL_APPLIER)
                     .await
                     .unwrap_or_default();
                 rec["replication"] = serde_json::json!({
                     "connection": conn.trim(),
                     "applier": app.trim(),
                 });
-                let gtid = r_sql(
+                let gtid = r_sql_ro(
                     route,
                     &n.container,
                     "root",
-                    ROOT_PASS,
+                    root_pass(),
                     "SELECT @@GLOBAL.gtid_executed",
                 )
                 .await
@@ -4698,7 +4916,7 @@ async fn capture_degrade_evidence(inst: &RdsInstance, hosts: &[serde_json::Value
 
 /// 采集文本脱敏(口令等敏感常量)
 fn redact_secret(s: &str) -> String {
-    s.replace(ROOT_PASS, "***").replace(REPL_PASS, "***")
+    s.replace(root_pass(), "***").replace(repl_pass(), "***")
 }
 
 /// 按字符截断(边界安全)
@@ -4813,7 +5031,7 @@ fn mysql_args(
         args.push(format!("127.0.0.1:{hp}:3306"));
     }
     args.push("-e".to_string());
-    args.push(format!("MYSQL_ROOT_PASSWORD={ROOT_PASS}"));
+    args.push(format!("MYSQL_ROOT_PASSWORD={ROOT_PASS}", ROOT_PASS = TOKEN_ROOT_PASS));
     args.push("-e".to_string());
     args.push("MYSQL_ALLOW_EMPTY_PASSWORD=yes".to_string());
     args.push(image_of("RDSCTL_MYSQL_IMAGE", MYSQL_IMAGE));
@@ -4841,7 +5059,7 @@ fn xenon_node_c(instance: &str, i: usize) -> String {
 /// rsproxy(newproxy)配置生成(xenon raft 前置代理;格式对齐 rsproxy conf/newproxy.conf):
 ///   [MySQL_Proxy_Layer] 服务端口;[Cluster_0]/[CTablet_0_t0] 单分片拓扑;
 ///   [Master_Host_g0]/[Slave_Host_g0] 初始成员(首启占位,HA worker 启动后按 raft 实况覆盖拓扑);
-///   [DB_User_dbu]/[Product_User_pu] 管控统一 root/ROOT_PASS(与直连节点同凭据);
+///   [DB_User_dbu]/[Product_User_pu] 管控统一 root 口令(env RDSCTL_ROOT_PASS,与直连节点同凭据);
 ///   [XenonRaft_0_t0] leader 自动发现 + 读一致性档位(members=容器名:3306,
 ///   raft_endpoints=容器名:8801 对齐 mysql.xenon_raft_status.leader 列)。
 /// 档位语义见 rsproxy docs/15-xenon-ha.md §4:strong 全走 leader / causal 高水位 GTID /
@@ -4863,7 +5081,7 @@ fn xenon_proxy_config(members: &[String], consistency: &str, _n_proxy: usize) ->
 port=4051
 mng_port=9111
 mng_user=admin
-mng_password=admin
+mng_password=__RDSCTL_PROXY_MNG_PASSWORD__
 max_threads=4
 log_dir=logs
 log_level=warn
@@ -4902,13 +5120,13 @@ cluster_tablet_name=t0
 
 [DB_User_dbu]
 db_username=root
-db_password={ROOT_PASS}
+db_password=__RDSCTL_ROOT_PASSWORD__
 default_db={APP_DB}
 cluster_name=rds
 
 [Product_User_pu]
 username=root
-password={ROOT_PASS}
+password=__RDSCTL_ROOT_PASSWORD__
 db_username=root
 max_connections=256
 cluster_name=rds
@@ -4964,12 +5182,12 @@ fn xenon_node_args(
         "-e".into(),
         "MYSQL_PORT=3306".into(),
         "-e".into(),
-        // 统一管控口令语义:巡检/查询台/慢查均用 root/ROOT_PASS 直连容器内 mysqld
-        format!("MYSQL_ROOT_PASSWORD={ROOT_PASS}"),
+        // 统一管控口令语义:巡检/查询台/慢查均用 root 口令(env RDSCTL_ROOT_PASS)直连容器内 mysqld
+        format!("MYSQL_ROOT_PASSWORD={ROOT_PASS}", ROOT_PASS = TOKEN_ROOT_PASS),
         "-e".into(),
         "REPL_USER=repl".into(),
         "-e".into(),
-        format!("REPL_PASSWD={REPL_PASS}"),
+        format!("REPL_PASSWD={REPL_PASS}", REPL_PASS = TOKEN_REPL_PASS),
         "-e".into(),
         format!("CLUSTER_PEERS={peers}"),
         "-e".into(),
@@ -5018,7 +5236,7 @@ async fn verify_xenon(members: &[String]) -> Result<String, String> {
     dk::exec_mysql_local(
         &leader,
         "root",
-        ROOT_PASS,
+        root_pass(),
         &format!(
             "CREATE DATABASE IF NOT EXISTS {APP_DB}; CREATE TABLE IF NOT EXISTS {APP_DB}.kv (k VARCHAR(64) PRIMARY KEY, v VARCHAR(128)); INSERT INTO {APP_DB}.kv (k, v) VALUES ('init', 'ok') ON DUPLICATE KEY UPDATE v='ok';"
         ),
@@ -5034,7 +5252,7 @@ async fn verify_xenon(members: &[String]) -> Result<String, String> {
             match dk::exec_mysql_local(
                 c,
                 "root",
-                ROOT_PASS,
+                root_pass(),
                 &format!("SELECT v FROM {APP_DB}.kv WHERE k='init'"),
             )
             .await
@@ -5096,15 +5314,16 @@ fn create_nodes2(
             Step::WaitMysql {
                 container: mc.clone(),
                 user: "root".into(),
-                pass: ROOT_PASS.into(),
+                pass: String::new(), // 留空 = 执行时取实例统一口令(不落盘/不下发,见 step_pass)
                 timeout_secs: 120,
             },
             Step::ExecSql {
                 container: mc.clone(),
                 user: "root".into(),
-                pass: ROOT_PASS.into(),
+                pass: String::new(), // 留空 = 执行时取实例统一口令(不落盘/不下发,见 step_pass)
                 sql: format!(
-                    "CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED WITH mysql_native_password BY '{REPL_PASS}'; GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl'@'%'; FLUSH PRIVILEGES;"
+                    "CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED WITH mysql_native_password BY '{REPL_PASS}'; GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl'@'%'; FLUSH PRIVILEGES;",
+                    REPL_PASS = TOKEN_REPL_PASS
                 ),
             },
         ],
@@ -5296,15 +5515,16 @@ fn create_nodes_multi(
                 Step::WaitMysql {
                     container: mc.clone(),
                     user: "root".into(),
-                    pass: ROOT_PASS.into(),
+                    pass: String::new(), // 留空 = 执行时取实例统一口令(不落盘/不下发,见 step_pass)
                     timeout_secs: 120,
                 },
                 Step::ExecSql {
                     container: mc.clone(),
                     user: "root".into(),
-                    pass: ROOT_PASS.into(),
+                    pass: String::new(), // 留空 = 执行时取实例统一口令(不落盘/不下发,见 step_pass)
                     sql: format!(
-                        "CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED WITH mysql_native_password BY '{REPL_PASS}'; GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl'@'%'; FLUSH PRIVILEGES;"
+                        "CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED WITH mysql_native_password BY '{REPL_PASS}'; GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl'@'%'; FLUSH PRIVILEGES;",
+                        REPL_PASS = TOKEN_REPL_PASS
                     ),
                 },
             ],
@@ -5440,15 +5660,16 @@ fn slave_steps(slave_c: &str, net: &str, master_c: &str, sid: u64) -> Vec<Step> 
         Step::WaitMysql {
             container: slave_c.to_string(),
             user: "root".into(),
-            pass: ROOT_PASS.into(),
+            pass: String::new(), // 留空 = 执行时取实例统一口令(不落盘/不下发,见 step_pass)
             timeout_secs: 120,
         },
         Step::ExecSql {
             container: slave_c.to_string(),
             user: "root".into(),
-            pass: ROOT_PASS.into(),
+            pass: String::new(), // 留空 = 执行时取实例统一口令(不落盘/不下发,见 step_pass)
             sql: format!(
-                "CHANGE REPLICATION SOURCE TO SOURCE_HOST='{master_c}', SOURCE_PORT=3306, SOURCE_USER='repl', SOURCE_PASSWORD='{REPL_PASS}', SOURCE_AUTO_POSITION=1; START REPLICA;"
+                "CHANGE REPLICATION SOURCE TO SOURCE_HOST='{master_c}', SOURCE_PORT=3306, SOURCE_USER='repl', SOURCE_PASSWORD='{REPL_PASS}', SOURCE_AUTO_POSITION=1; START REPLICA;",
+                REPL_PASS = TOKEN_REPL_PASS
             ),
         },
     ]
@@ -5684,7 +5905,7 @@ fn scaleout_nodes(
                 Step::WaitMysql {
                     container: sc_name.clone(),
                     user: "root".into(),
-                    pass: ROOT_PASS.into(),
+                    pass: String::new(), // 留空 = 执行时取实例统一口令(不落盘/不下发,见 step_pass)
                     timeout_secs: 120,
                 },
             ],
@@ -5698,9 +5919,10 @@ fn scaleout_nodes(
             steps: vec![Step::ExecSql {
                 container: sc_name.clone(),
                 user: "root".into(),
-                pass: ROOT_PASS.into(),
+                pass: String::new(), // 留空 = 执行时取实例统一口令(不落盘/不下发,见 step_pass)
                 sql: format!(
-                    "CHANGE REPLICATION SOURCE TO SOURCE_HOST='{mc}', SOURCE_PORT=3306, SOURCE_USER='repl', SOURCE_PASSWORD='{REPL_PASS}', SOURCE_AUTO_POSITION=1; START REPLICA;"
+                    "CHANGE REPLICATION SOURCE TO SOURCE_HOST='{mc}', SOURCE_PORT=3306, SOURCE_USER='repl', SOURCE_PASSWORD='{REPL_PASS}', SOURCE_AUTO_POSITION=1; START REPLICA;",
+                    REPL_PASS = TOKEN_REPL_PASS
                 ),
             }],
         },
@@ -5746,8 +5968,10 @@ fn backup_nodes(name: &str, master_c: &str) -> Vec<TaskNode> {
     let n = name.to_string();
     let mc = master_c.to_string();
     let dump = format!("/tmp/rds-{n}-backup.sql");
+    // 口令从**容器自身 env** 取(MYSQL_ROOT_PASSWORD),不写进命令行:
+    // 该命令会随步骤 JSON 落库/下发,内联明文等于把口令发给所有 tasks.view 用户。
     let cmd = format!(
-        "set -e; mysqldump -u root -p'{ROOT_PASS}' --single-transaction --quick --databases {APP_DB} > {dump} 2> /tmp/rds-{n}-dump.err; echo 'backup-ok bytes='$(wc -c < {dump})"
+        "set -e; mysqldump -u root -p\"$MYSQL_ROOT_PASSWORD\" --single-transaction --quick --databases {APP_DB} > {dump} 2> /tmp/rds-{n}-dump.err; echo 'backup-ok bytes='$(wc -c < {dump})"
     );
     vec![TaskNode {
         id: "backup".into(),
@@ -5788,12 +6012,7 @@ pub fn make_executor() -> StepExecutor {
 fn exec_agent(route: &NodeRoute) -> Option<crate::agent::Agent> {
     match route {
         NodeRoute::Agent { ag, .. } => Some(ag.clone()),
-        NodeRoute::Local => crate::ha::runtime::global().and_then(|_| {
-            std::env::var("RDSCTL_AGENT_URL")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .map(|u| crate::agent::Agent::new(u, crate::agent::token_opt()))
-        }),
+        NodeRoute::Local => local_agent(),
         NodeRoute::Unmanaged { .. } => None,
     }
 }
@@ -5897,7 +6116,69 @@ async fn ledger_done(ledger: Ledger, result: &str) -> Result<(), String> {
     }
 }
 
+/// 把步骤内容里的口令哨兵替换为真实口令。
+///
+/// 统一在 `exec_step` 入口做一次,覆盖所有可能携带口令的步骤类型
+/// (`DockerRun`/`DockerExec` 的 args、`ExecSql`/`HostMysql`/`WaitMysql` 的 sql/pass、
+/// `WriteHostFile` 的 content)—— 这样步骤 JSON 落库与下发时只有哨兵,真实口令
+/// 仅在执行瞬间存在于内存与本机文件。
+fn materialize_step(step: Step) -> Step {
+    let m = |s: String| materialize_secrets(&s);
+    let mv = |v: Vec<String>| v.into_iter().map(m).collect::<Vec<_>>();
+    match step {
+        Step::DockerRun { container, args } => Step::DockerRun {
+            container,
+            args: mv(args),
+        },
+        Step::DockerExec { container, args } => Step::DockerExec {
+            container,
+            args: mv(args),
+        },
+        Step::ExecSql {
+            container,
+            user,
+            pass,
+            sql,
+        } => Step::ExecSql {
+            container,
+            user,
+            pass: m(pass),
+            sql: m(sql),
+        },
+        Step::HostMysql {
+            port,
+            user,
+            pass,
+            sql,
+        } => Step::HostMysql {
+            port,
+            user,
+            pass: m(pass),
+            sql: m(sql),
+        },
+        Step::WaitMysql {
+            container,
+            user,
+            pass,
+            timeout_secs,
+        } => Step::WaitMysql {
+            container,
+            user,
+            pass: m(pass),
+            timeout_secs,
+        },
+        Step::WriteHostFile { path, content } => Step::WriteHostFile {
+            path,
+            content: m(content),
+        },
+        other => other,
+    }
+}
+
 async fn exec_step(ctx: &StepCtx, step: Step) -> Result<String, String> {
+    // 口令哨兵 → 真实口令:必须在**执行前**完成,且各步骤的账本摘要按替换后的内容计算
+    // (与历史上步骤内联明文时的摘要一致,重启/重试不会因本次改造重放)。
+    let step = materialize_step(step);
     match step {
         Step::DockerRun { container, args } => {
             let mut key_parts: Vec<&str> = vec!["docker_run", &container];
@@ -5988,11 +6269,17 @@ async fn exec_step(ctx: &StepCtx, step: Step) -> Result<String, String> {
             Ok(out)
         }
         Step::NetworkCreate { name } => {
-            dk::network_create(&name).await?;
+            // 网络是实例级资源:路由取该实例已绑定宿主机(未绑定 → 本机默认后端)
+            let rt = runtime_of_route(&instance_exec_route(&ctx.instance)).map_err(|e| e.to_string())?;
+            // 变更类:携带本实例当前租约 fence(cluster 模式经 agent 时强制校验)
+            let meta = crate::manager().call_meta(&ctx.instance);
+            rt.network_ensure(&name, &meta).await.map_err(|e| e.to_string())?;
             Ok(format!("网络 {name} 就绪"))
         }
         Step::NetworkRm { name } => {
-            dk::network_rm(&name).await?;
+            let rt = runtime_of_route(&instance_exec_route(&ctx.instance)).map_err(|e| e.to_string())?;
+            let meta = crate::manager().call_meta(&ctx.instance);
+            rt.network_remove(&name, &meta).await.map_err(|e| e.to_string())?;
             Ok(format!("网络 {name} 已移除"))
         }
         Step::ExecSql {
@@ -6001,6 +6288,8 @@ async fn exec_step(ctx: &StepCtx, step: Step) -> Result<String, String> {
             pass,
             sql,
         } => {
+            // 口令留空 → 实例统一 root 口令(模板/用户模块无需明文)
+            let pass = step_pass(&user, &pass);
             // 复制变更/切主是最高风险的副作用:必须走账本(重放短路)+ fence(拒绝过期持有者)
             let key = args_digest(&["exec_sql", &container, &user, &sql]);
             let ledger = ledger_begin(ctx, &key).await?;
@@ -6046,7 +6335,9 @@ async fn exec_step(ctx: &StepCtx, step: Step) -> Result<String, String> {
             Ok(out)
         }
         Step::DockerExec { container, args } => {
-            let out = dk::exec_in(&container, &args).await?;
+            // 按路由执行(绑定宿主机 → agent 上的同一原语;平台由 agent 侧决定)
+            let rt = runtime_of_route(&step_route(&ctx.instance, &container)).map_err(|e| e.to_string())?;
+            let out = rt.exec(&container, &args).await.map_err(|e| e.to_string())?;
             Ok(if out.trim().is_empty() {
                 format!("{container}: docker exec 完成")
             } else {
@@ -6059,6 +6350,8 @@ async fn exec_step(ctx: &StepCtx, step: Step) -> Result<String, String> {
             pass,
             sql,
         } => {
+            // 控制主机侧的映射端口探测(不经过工作负载执行后端,见 docker.rs::host_mysql)
+            let pass = step_pass(&user, &pass);
             let out = dk::host_mysql(port, &user, &pass, &sql).await?;
             Ok(out)
         }
@@ -6066,7 +6359,10 @@ async fn exec_step(ctx: &StepCtx, step: Step) -> Result<String, String> {
             container,
             timeout_secs,
         } => {
-            dk::wait_healthy(&container, timeout_secs).await?;
+            let rt = runtime_of_route(&step_route(&ctx.instance, &container)).map_err(|e| e.to_string())?;
+            rt.wait_healthy(&container, timeout_secs)
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(format!("容器 {container} 健康"))
         }
         Step::WaitMysql {
@@ -6075,7 +6371,11 @@ async fn exec_step(ctx: &StepCtx, step: Step) -> Result<String, String> {
             pass,
             timeout_secs,
         } => {
-            dk::wait_mysql_ready(&container, &user, &pass, timeout_secs).await?;
+            let rt = runtime_of_route(&step_route(&ctx.instance, &container)).map_err(|e| e.to_string())?;
+            let pass = step_pass(&user, &pass);
+            rt.wait_mysql_ready(&container, &user, &pass, timeout_secs)
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(format!("{container} MySQL 就绪"))
         }
         Step::WriteHostFile { path, content } => {
@@ -6139,6 +6439,10 @@ async fn exec_step(ctx: &StepCtx, step: Step) -> Result<String, String> {
             );
             let mut last_err = String::new();
             let mut started = false;
+            // DTS 占位容器也走路由:绑定宿主机时在目标机上创建(平台由 agent 侧决定)。
+            // DTS 容器不在实例 nodes/proxies 内,自动解析找不到归属 → 显式带实例 fence。
+            let rt = runtime_of_route(&step_route(&instance, &dts_container)).map_err(|e| e.to_string())?;
+            let dts_meta = crate::manager().call_meta(&instance);
             for img in dts_placeholder_images() {
                 let args: Vec<String> = vec![
                     "--restart".into(),
@@ -6150,7 +6454,14 @@ async fn exec_step(ctx: &StepCtx, step: Step) -> Result<String, String> {
                     "sleep 315360000".into(), // 常驻空容器,占位不跑 DTS 引擎(十年后结束;届时由移除流程删除)
                 ];
                 let args_ref: Vec<&str> = args.iter().map(|x| x.as_str()).collect();
-                match dk::run(&dts_container, &args_ref).await {
+                let spec = match crate::exec::spec::docker_args_to_spec(&dts_container, &args_ref) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        last_err = format!("镜像 {img}:{e}");
+                        continue;
+                    }
+                };
+                match rt.create(&spec, &dts_meta).await {
                     Ok(()) => {
                         started = true;
                         break;
@@ -6330,7 +6641,7 @@ async fn verify_replication(
     dk::exec_mysql_local(
         master,
         "root",
-        ROOT_PASS,
+        root_pass(),
         &format!(
             "CREATE DATABASE IF NOT EXISTS {APP_DB}; CREATE TABLE IF NOT EXISTS {APP_DB}.kv (k VARCHAR(64) PRIMARY KEY, v VARCHAR(128)); INSERT INTO {APP_DB}.kv (k, v) VALUES ('init', 'ok') ON DUPLICATE KEY UPDATE v='ok';"
         ),
@@ -6344,7 +6655,7 @@ async fn verify_replication(
         let v = dk::exec_mysql_local(
             s,
             "root",
-            ROOT_PASS,
+            root_pass(),
             &format!("SELECT v FROM {APP_DB}.kv WHERE k='init'"),
         )
         .await
@@ -6356,7 +6667,7 @@ async fn verify_replication(
     // 代理连通(重试预热)
     let mut last = String::new();
     for _ in 0..8 {
-        match dk::host_mysql(proxy_port, "root", ROOT_PASS, "SELECT 1").await {
+        match dk::host_mysql(proxy_port, "root", root_pass(), "SELECT 1").await {
             Ok(o) if o.trim() == "1" => {
                 return Ok(format!(
                     "验证通过:主+{} 从复制正常,接入层(LVS) 127.0.0.1:{proxy_port} 真实可查",
@@ -6379,7 +6690,7 @@ async fn verify_scaleout(master: &str, new_slave: &str) -> Result<String, String
     let v = dk::exec_mysql_local(
         new_slave,
         "root",
-        ROOT_PASS,
+        root_pass(),
         &format!("SELECT v FROM {APP_DB}.kv WHERE k='init'"),
     )
     .await
@@ -6394,7 +6705,7 @@ async fn gtid_of(container: &str) -> Result<String, String> {
     let out = dk::exec_mysql_local(
         container,
         "root",
-        ROOT_PASS,
+        root_pass(),
         "SELECT @@GLOBAL.gtid_executed",
     )
     .await
@@ -6406,7 +6717,7 @@ async fn wait_gtid(slave: &str, gtid: &str) -> Result<(), String> {
     dk::exec_mysql_local(
         slave,
         "root",
-        ROOT_PASS,
+        root_pass(),
         &format!("SELECT WAIT_FOR_EXECUTED_GTID_SET('{gtid}', 15)"),
     )
     .await
@@ -6439,7 +6750,7 @@ async fn wait_slave_caught(
     let mut last = String::from("尚未开始");
     while std::time::Instant::now() < deadline {
         // 1) 复制线程
-        match r_sql(sr, sname, "root", ROOT_PASS, CHECK).await {
+        match r_sql_ro(sr, sname, "root", root_pass(), CHECK).await {
             Ok(o) if o.trim() == "OK" => {}
             Ok(_) => {
                 last = format!("{sname} 复制线程未运行(IO/SQL)");
@@ -6454,7 +6765,7 @@ async fn wait_slave_caught(
         }
         // 2) 主库 GTID 全集 → 新从是否已追平(GTID_SUBSET=1 即已应用全集;
         //    不用 WAIT_FOR_EXECUTED_GTID_SET:实测 8.0.46 上即使已追上该函数也恒返回 0)
-        let gtid = match r_sql(mr, mc, "root", ROOT_PASS, "SELECT @@GLOBAL.gtid_executed").await {
+        let gtid = match r_sql_ro(mr, mc, "root", root_pass(), "SELECT @@GLOBAL.gtid_executed").await {
             Ok(o) => o.lines().last().unwrap_or("").trim().to_string(),
             Err(e) => {
                 last = format!("获取主库 {mc} GTID 失败: {e}");
@@ -6465,11 +6776,11 @@ async fn wait_slave_caught(
         if gtid.is_empty() {
             return Ok(()); // 空实例(无任何事务)
         }
-        match r_sql(
+        match r_sql_ro(
             sr,
             sname,
             "root",
-            ROOT_PASS,
+            root_pass(),
             &format!("SELECT GTID_SUBSET('{gtid}', @@GLOBAL.gtid_executed)"),
         )
         .await
@@ -6526,21 +6837,22 @@ async fn exec_replace_node_core(
             .await
             .map_err(|e| format!("目标宿主机启动临时容器 {temp} 失败: {e}"))?;
         logs.push(format!("临时容器 {temp} 已启动(目标 {host})"));
-        wait_mysql_route(&tgt, &temp, "root", ROOT_PASS, 120).await?;
+        wait_mysql_route(&tgt, &temp, "root", root_pass(), 120).await?;
         r_sql(
             &tgt,
             &temp,
             "root",
-            ROOT_PASS,
+            root_pass(),
             &format!(
-                "CHANGE REPLICATION SOURCE TO SOURCE_HOST='{master}', SOURCE_PORT=3306, SOURCE_USER='repl', SOURCE_PASSWORD='{REPL_PASS}', SOURCE_AUTO_POSITION=1; START REPLICA;"
+                "CHANGE REPLICATION SOURCE TO SOURCE_HOST='{master}', SOURCE_PORT=3306, SOURCE_USER='repl', SOURCE_PASSWORD='{REPL_PASS}', SOURCE_AUTO_POSITION=1; START REPLICA;",
+                REPL_PASS = TOKEN_REPL_PASS
             ),
         )
         .await
         .map_err(|e| format!("临时从 {temp} 配置复制失败: {e}"))?;
     } else {
         logs.push(format!("临时容器 {temp} 已存在,跳过重建(续跑)"));
-        wait_mysql_route(&tgt, &temp, "root", ROOT_PASS, 120).await?;
+        wait_mysql_route(&tgt, &temp, "root", root_pass(), 120).await?;
     }
     // 2) 追平校验(失败 → 清理临时容器后报错,旧节点不受影响)
     let mr = resolve_route_of(&inst, &master, &hosts);
@@ -6561,7 +6873,7 @@ async fn exec_replace_node_core(
         r_rename(&tgt, &temp, node).await.map_err(|e| {
             format!("临时容器换名 {temp} → {node} 失败(旧节点已下线,请重跑本任务恢复): {e}")
         })?;
-        wait_mysql_route(&tgt, node, "root", ROOT_PASS, 120).await?;
+        wait_mysql_route(&tgt, node, "root", root_pass(), 120).await?;
         logs.push(format!("节点 {node} 已在宿主机 {host} 换名上线"));
     }
     Ok(logs.join("; "))
@@ -6681,20 +6993,21 @@ async fn migrate_move_master(
         r_run(&tgt, &temp, &args_ref)
             .await
             .map_err(|e| format!("目标机启动临时新主 {temp} 失败: {e}"))?;
-        wait_mysql_route(&tgt, &temp, "root", ROOT_PASS, 120).await?;
+        wait_mysql_route(&tgt, &temp, "root", root_pass(), 120).await?;
         r_sql(
             &tgt,
             &temp,
             "root",
-            ROOT_PASS,
+            root_pass(),
             &format!(
-                "CHANGE REPLICATION SOURCE TO SOURCE_HOST='{master_c}', SOURCE_PORT=3306, SOURCE_USER='repl', SOURCE_PASSWORD='{REPL_PASS}', SOURCE_AUTO_POSITION=1; START REPLICA;"
+                "CHANGE REPLICATION SOURCE TO SOURCE_HOST='{master_c}', SOURCE_PORT=3306, SOURCE_USER='repl', SOURCE_PASSWORD='{REPL_PASS}', SOURCE_AUTO_POSITION=1; START REPLICA;",
+                REPL_PASS = TOKEN_REPL_PASS
             ),
         )
         .await
         .map_err(|e| format!("临时新主 {temp} 挂复制链失败: {e}"))?;
     } else {
-        wait_mysql_route(&tgt, &temp, "root", ROOT_PASS, 120).await?;
+        wait_mysql_route(&tgt, &temp, "root", root_pass(), 120).await?;
     }
     logs.push(format!("临时新主 {temp} 已启动并挂链(目标 {host})"));
     // 2) 追平(失败清临时,老主不受影响)
@@ -6707,14 +7020,14 @@ async fn migrate_move_master(
         &old_mr,
         &master_c,
         "root",
-        ROOT_PASS,
+        root_pass(),
         "SET GLOBAL read_only=ON",
     )
     .await
     .map_err(|e| format!("老主 {master_c} 置只读失败: {e}"))?;
     tokio::time::sleep(std::time::Duration::from_millis(600)).await;
     wait_slave_caught(&tgt, &temp, &old_mr, &master_c, 60).await?;
-    let _ = r_sql(&tgt, &temp, "root", ROOT_PASS, "STOP REPLICA").await;
+    let _ = r_sql(&tgt, &temp, "root", root_pass(), "STOP REPLICA").await;
     let _ = r_rm(&old_mr, &master_c).await; // 摘老主(数据面以临时新主为准;同机先释放容器名)
     if r_exists(&tgt, &master_c).await {
         let _ = r_rm(&tgt, &temp).await; // 续跑:目标机已存在正式主(上次换名后中断)
@@ -6722,13 +7035,13 @@ async fn migrate_move_master(
         r_rename(&tgt, &temp, &master_c).await.map_err(|e| {
             format!("新主换名 {temp} → {master_c} 失败(老主已下线,请重跑迁移恢复): {e}")
         })?;
-        wait_mysql_route(&tgt, &master_c, "root", ROOT_PASS, 120).await?;
+        wait_mysql_route(&tgt, &master_c, "root", root_pass(), 120).await?;
     }
     r_sql(
         &tgt,
         &master_c,
         "root",
-        ROOT_PASS,
+        root_pass(),
         "SET GLOBAL read_only=OFF; SET GLOBAL super_read_only=OFF",
     )
     .await
@@ -6748,9 +7061,10 @@ async fn migrate_move_master(
             &route,
             &n.container,
             "root",
-            ROOT_PASS,
+            root_pass(),
             &format!(
-                "STOP REPLICA; CHANGE REPLICATION SOURCE TO SOURCE_HOST='{master_c}', SOURCE_PORT=3306, SOURCE_USER='repl', SOURCE_PASSWORD='{REPL_PASS}', SOURCE_AUTO_POSITION=1; START REPLICA;"
+                "STOP REPLICA; CHANGE REPLICATION SOURCE TO SOURCE_HOST='{master_c}', SOURCE_PORT=3306, SOURCE_USER='repl', SOURCE_PASSWORD='{REPL_PASS}', SOURCE_AUTO_POSITION=1; START REPLICA;",
+                REPL_PASS = TOKEN_REPL_PASS
             ),
         )
         .await;
@@ -7179,14 +7493,14 @@ async fn collect_replica_facts(
             continue;
         }
         let (alive, io, sql, semisync) = if n.role == Role::Master {
-            let alive = r_sql(&route, &n.container, "root", ROOT_PASS, "SELECT 1")
+            let alive = r_sql_ro(&route, &n.container, "root", root_pass(), "SELECT 1")
                 .await
                 .is_ok();
-            let (en, ack) = r_sql(
+            let (en, ack) = r_sql_ro(
                 &route,
                 &n.container,
                 "root",
-                ROOT_PASS,
+                root_pass(),
                 "SELECT @@global.rpl_semi_sync_master_enabled, IFNULL((SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='Rpl_semi_sync_master_clients'),0)",
             )
             .await
@@ -7210,15 +7524,15 @@ async fn collect_replica_facts(
                 }),
             )
         } else {
-            let probe = r_sql(&route, &n.container, "root", ROOT_PASS, "SELECT 1").await;
+            let probe = r_sql_ro(&route, &n.container, "root", root_pass(), "SELECT 1").await;
             let alive = probe.is_ok();
             // IO/SQL 线程(P_S,与 replica_problem 同源)
             let (io, sql) = if alive {
-                r_sql(
+                r_sql_ro(
                     &route,
                     &n.container,
                     "root",
-                    ROOT_PASS,
+                    root_pass(),
                     "SELECT CONCAT_WS('|', IF(EXISTS(SELECT 1 FROM performance_schema.replication_connection_status WHERE CHANNEL_NAME='' AND SERVICE_STATE='ON'),'1','0'), IF(EXISTS(SELECT 1 FROM performance_schema.replication_applier_status WHERE CHANNEL_NAME='' AND SERVICE_STATE='ON'),'1','0'))",
                 )
                 .await
@@ -7236,11 +7550,11 @@ async fn collect_replica_facts(
             };
             // 从侧半同步开关
             let slv_en = if alive {
-                r_sql(
+                r_sql_ro(
                     &route,
                     &n.container,
                     "root",
-                    ROOT_PASS,
+                    root_pass(),
                     "SELECT @@global.rpl_semi_sync_slave_enabled",
                 )
                 .await
@@ -7421,7 +7735,7 @@ async fn reparent_core(
         return Err("候选不能是当前主节点".into());
     }
     // 旧主可达性(auto 允许不可达)
-    let old_alive = dk::exec_mysql_local(&old, "root", ROOT_PASS, "SELECT 1")
+    let old_alive = dk::exec_mysql_local(&old, "root", root_pass(), "SELECT 1")
         .await
         .is_ok();
     if !old_alive && mode == "planned" {
@@ -7429,7 +7743,7 @@ async fn reparent_core(
     }
     if old_alive {
         // 停写
-        match dk::exec_mysql_local(&old, "root", ROOT_PASS, "SET GLOBAL read_only=ON").await {
+        match dk::exec_mysql_local(&old, "root", root_pass(), "SET GLOBAL read_only=ON").await {
             Ok(_) => log.push(format!("旧主 {old} 已置只读")),
             Err(e) => return Err(format!("旧主 {old} 置只读失败:{e}")),
         }
@@ -7439,11 +7753,11 @@ async fn reparent_core(
     // 提升候选
     let promote_sqls = ["STOP SLAVE", "RESET SLAVE ALL", "SET GLOBAL read_only=OFF"];
     for s in promote_sqls {
-        if let Err(e) = dk::exec_mysql_local(&cand, "root", ROOT_PASS, s).await {
+        if let Err(e) = dk::exec_mysql_local(&cand, "root", root_pass(), s).await {
             // 提升失败:若旧主已只读则回滚其可写,避免两端只读
             if old_alive {
                 let _ =
-                    dk::exec_mysql_local(&old, "root", ROOT_PASS, "SET GLOBAL read_only=OFF").await;
+                    dk::exec_mysql_local(&old, "root", root_pass(), "SET GLOBAL read_only=OFF").await;
             }
             return Err(format!("提升候选 {cand} 失败({s}): {e}"));
         }
@@ -7452,9 +7766,10 @@ async fn reparent_core(
     // 旧主(存活)重挂为新主的从(best-effort;GTID 关闭环境会失败,仅告警不阻断)
     if old_alive {
         let change = format!(
-            "STOP SLAVE; CHANGE MASTER TO MASTER_HOST='{cand}', MASTER_PORT=3306, MASTER_USER='repl', MASTER_PASSWORD='{REPL_PASS}', MASTER_AUTO_POSITION=1; START SLAVE;"
+            "STOP SLAVE; CHANGE MASTER TO MASTER_HOST='{cand}', MASTER_PORT=3306, MASTER_USER='repl', MASTER_PASSWORD='{REPL_PASS}', MASTER_AUTO_POSITION=1; START SLAVE;",
+            REPL_PASS = TOKEN_REPL_PASS
         );
-        match dk::exec_mysql_local(&old, "root", ROOT_PASS, &change).await {
+        match dk::exec_mysql_local(&old, "root", root_pass(), &change).await {
             Ok(_) => log.push(format!("旧主 {old} 已重挂到新主 {cand}")),
             Err(e) => log.push(format!("旧主 {old} 重挂失败(可后续手工修复):{e}")),
         }
@@ -7555,7 +7870,7 @@ fn proxy_config(master_host: &str, slave_host: &str) -> String {
 port=4051
 mng_port=9111
 mng_user=admin
-mng_password=admin
+mng_password=__RDSCTL_PROXY_MNG_PASSWORD__
 max_threads=4
 log_dir=logs
 log_level=warn
@@ -7594,13 +7909,13 @@ cluster_tablet_name=t0
 
 [DB_User_dbu]
 db_username=root
-db_password={ROOT_PASS}
+db_password=__RDSCTL_ROOT_PASSWORD__
 default_db={APP_DB}
 cluster_name=rds
 
 [Product_User_pu]
 username=root
-password={ROOT_PASS}
+password=__RDSCTL_ROOT_PASSWORD__
 db_username=root
 max_connections=256
 cluster_name=rds
@@ -7821,11 +8136,15 @@ mod ai0_evidence {
 
     #[test]
     fn redact_and_clip_work() {
-        // 口令类常量被脱敏
-        let s = format!("mysql error near {ROOT_PASS} and {REPL_PASS}");
+        // 口令类取值被脱敏
+        let s = format!(
+            "mysql error near {ROOT_PASS} and {REPL_PASS}",
+            ROOT_PASS = root_pass(),
+            REPL_PASS = repl_pass()
+        );
         let r = redact_secret(&s);
         assert!(
-            !r.contains(ROOT_PASS) && !r.contains(REPL_PASS),
+            !r.contains(root_pass()) && !r.contains(repl_pass()),
             "口令必须脱敏: {r}"
         );
         assert!(r.contains("***"));
@@ -7850,6 +8169,86 @@ mod ai0_evidence {
         // 已 degraded 原因由空到有/有到空:写
         assert!(snapshot_write_needed(false, "", "容器缺失"));
         assert!(snapshot_write_needed(false, "容器缺失", ""));
+    }
+}
+
+#[cfg(test)]
+mod secret_not_persisted {
+    //! 口令不得进入任务节点 JSON。
+    //!
+    //! 任务定义会落库(`task_nodes`)并经 `GET /api/rds/task` 原样回给 `tasks.view` 用户 ——
+    //! 一旦序列化进步骤,就等于把实例口令下发给了每个只读用户。因此所有内置步骤一律
+    //! `pass: ""`,由 `step_pass` 在执行时解析为实例统一口令(env 可覆盖)。
+    use super::*;
+
+    /// 任务节点里的步骤就是落库/下发的载体(Step 是 Serialize 的持久化契约)
+    fn steps_json(nodes: &[TaskNode]) -> String {
+        let steps: Vec<&Step> = nodes.iter().flat_map(|n| n.steps.iter()).collect();
+        serde_json::to_string(&steps).unwrap()
+    }
+
+    #[test]
+    fn create_dag_steps_carry_no_plaintext_password() {
+        let slaves = vec![
+            ("rds-t-slave-1".to_string(), "read".to_string(), 11u64),
+            ("rds-t-slave-2".to_string(), "offline".to_string(), 12u64),
+        ];
+        let proxies = vec![("rds-t-px1".to_string(), 35001u16, 9111u16)];
+        let dag = create_nodes2("t", "rds-t-net", "rds-t-master", &slaves, &proxies, 10, "", 0);
+        let json = steps_json(&dag);
+        assert!(
+            !json.contains(root_pass()),
+            "root 口令不得出现在任务定义中"
+        );
+        assert!(
+            !json.contains(repl_pass()),
+            "repl 口令不得出现在任务定义中"
+        );
+        assert!(
+            json.contains("\"pass\":\"\""),
+            "口令字段应为空(执行时解析):{json}"
+        );
+    }
+
+    #[test]
+    fn backup_steps_carry_no_plaintext_password() {
+        let dag = backup_nodes("t", "rds-t-master");
+        let json = steps_json(&dag);
+        assert!(
+            !json.contains(root_pass()),
+            "备份步骤不得内联口令:{json}"
+        );
+    }
+
+    #[test]
+    fn scaleout_steps_carry_no_plaintext_password() {
+        let dag = scaleout_nodes(
+            "t",
+            "rds-t-master",
+            "rds-t-net",
+            "rds-t-slave-2",
+            12,
+            35002,
+            Role::Read,
+            "cn-bj",
+            "az1",
+            "",
+            "",
+        );
+        let json = steps_json(&dag);
+        assert!(!json.contains(root_pass()), "扩容步骤不得内联 root 口令");
+        assert!(!json.contains(repl_pass()), "扩容步骤不得内联 repl 口令");
+    }
+
+    #[test]
+    fn empty_pass_resolves_to_root_only_for_root_user() {
+        // 留空 + root → 取实例统一口令
+        assert_eq!(step_pass("root", ""), root_pass());
+        // 非 root 用户留空仍按字面空口令,不得"借用" root 口令
+        assert_eq!(step_pass("app", ""), "");
+        // 显式给口令时不被覆盖
+        assert_eq!(step_pass("root", "explicit"), "explicit");
+        assert_eq!(step_pass("app", "explicit"), "explicit");
     }
 }
 
@@ -8068,6 +8467,61 @@ mod port_alloc_tests {
         assert!(host_port_free(got), "分配结果应真实可用");
         drop(occupy);
     }
+
+    /// 端口分配必须避让「已被任一实例声明」的端口,即使当前无人监听。
+    ///
+    /// 回归背景:仅靠 `bind` 探测会误判 —— 端口所属容器可能已停止、
+    /// 或声明它的副本已重启,此时端口"可绑"但仍属于别的实例。
+    #[test]
+    fn alloc_skips_ports_declared_by_existing_instances() {
+        let store = Arc::new(crate::store::Store::from_backend(
+            crate::store::MemoryBackend::new(),
+        ));
+        let m = RdsManager::new(store);
+        // 造一个声明了 35000..35060 的实例(节点 host_port + rpc + LVS + 代理端口)
+        let mut i = crate::instance::test_support::legacy_inst_for_destroy("pa");
+        i.nodes.clear();
+        i.proxies.clear();
+        i.lvs_mysql_port = 35_055;
+        i.node_hosts.clear();
+        m.instances.insert("pa".to_string(), i);
+        let declared: std::collections::HashSet<u16> = m.declared_ports();
+        assert!(declared.contains(&35_055), "LVS 端口必须计入已声明集合");
+        for _ in 0..20 {
+            let got = m.alloc_host_port();
+            assert!(
+                !declared.contains(&got),
+                "分配出的端口 {got} 已被现有实例声明({declared:?})"
+            );
+        }
+    }
+
+    /// 重启后端口水位必须覆盖 **所有** 会占宿主端口的字段。
+    ///
+    /// 回归背景:水位原先漏了 `lvs_mysql_port` / `rpc_host_port` / `proxies[].*`,
+    /// 重启后 `next_port` 会从这些端口之下起步,把仍被旧实例声明的端口重新分配出去
+    /// (典型症状:接入层/代理端口 EADDRINUSE)。
+    #[test]
+    fn next_port_watermark_covers_lvs_and_proxy_ports() {
+        let store = Arc::new(crate::store::Store::from_backend(
+            crate::store::MemoryBackend::new(),
+        ));
+        let mut i = crate::instance::test_support::legacy_inst_for_destroy("wm");
+        i.nodes.clear();
+        i.proxies.clear();
+        i.lvs_mysql_port = 51_234; // 故意远高于节点/代理端口
+        i.proxy_mysql_port = 0;
+        i.proxy_mng_port = 0;
+        i.node_hosts.clear();
+        let data = serde_json::to_string(&i).unwrap();
+        store.instance_upsert("wm", "", "", &data, "running", 0);
+        let m = RdsManager::new(store); // 构造即 load_persisted → 恢复水位
+        let got = m.alloc_host_port();
+        assert!(
+            got > 51_234,
+            "水位应越过 lvs_mysql_port(51234),实际分配 {got}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -8191,7 +8645,7 @@ pub async fn monitor_db_metrics_filtered(
             Role::Read => "read",
             _ => "offline",
         };
-        let raw = dk::query_table(&n.container, "root", ROOT_PASS, sql, 10, "")
+        let raw = dk::query_table(&n.container, "root", root_pass(), sql, 10, "")
             .await
             .unwrap_or_default();
         let mut vals: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
@@ -9262,8 +9716,10 @@ mod xenon_create {
         // 初始拓扑占位 = 前 2 个成员(首启后由 HA worker 按 raft 实况覆盖)
         assert!(conf.contains("host=rds-f-xenon1\n"));
         assert!(conf.contains("host=rds-f-xenon2\n"));
-        // 统一管控凭据与默认库
-        assert!(conf.contains(&format!("db_password={ROOT_PASS}")));
+        // 统一管控凭据与默认库:口令以哨兵占位(模板不下发明文),落盘时才替换
+        assert!(conf.contains(&format!("db_password={TOKEN_ROOT_PASS}")));
+        assert!(!conf.contains(root_pass()), "配置模板不得内联明文口令");
+        assert!(materialize_secrets(&conf).contains(&format!("db_password={}", root_pass())));
         assert!(conf.contains(&format!("default_db={APP_DB}")));
         // 服务端口与既有代理镜像约定一致
         assert!(conf.contains("port=4051"));
@@ -9271,6 +9727,69 @@ mod xenon_create {
         // strong 档(默认)同样可生成
         let strong = xenon_proxy_config(&members, "strong", 1);
         assert!(strong.contains("read_consistency=strong"));
+    }
+}
+
+#[cfg(test)]
+mod exec_route_tests {
+    use super::*;
+
+    /// 执行面路由 → 后端映射(P0 抽象层契约):
+    /// 本机 = 进程默认后端;绑定 agent = AgentRuntime;管理盲区 = fail-closed。
+    #[test]
+    fn runtime_of_route_covers_local_agent_unmanaged() {
+        let rt = runtime_of_route(&NodeRoute::Local).expect("本机路由应有后端");
+        assert_ne!(rt.kind(), "agent");
+        assert_ne!(rt.kind(), "broken", "默认后端不应是未实现后端");
+
+        let ag = crate::agent::Agent::new("http://127.0.0.1:9199".into(), None);
+        let route = NodeRoute::Agent {
+            host: "host-a".into(),
+            ag,
+        };
+        assert_eq!(runtime_of_route(&route).unwrap().kind(), "agent");
+        assert_eq!(route.label(), "agent");
+
+        let unmanaged = NodeRoute::Unmanaged {
+            host: "host-b".into(),
+        };
+        let msg = match runtime_of_route(&unmanaged) {
+            Ok(rt) => panic!("管理盲区必须 fail-closed,却拿到后端 {}", rt.kind()),
+            Err(e) => e.to_string(),
+        };
+        assert!(msg.contains("host-b") && msg.contains("agent 未接入"), "{msg}");
+    }
+
+    /// 未知 RDSCTL_RUNTIME 不得静默回落本机 docker
+    #[test]
+    fn unknown_runtime_kind_fails_closed() {
+        let rt = crate::exec::runtime_for_kind("__no_such_platform__");
+        assert_eq!(rt.kind(), "broken");
+        let spec = crate::exec::spec::docker_args_to_spec("c1", &["mysql:8.0"]).unwrap();
+        let out = block_on(rt.create(&spec, &crate::exec::ExecMeta::none()));
+        assert!(out.is_err(), "未实现后端必须拒绝所有原语");
+        // 已知取值仍映射到真实后端
+        assert_eq!(crate::exec::runtime_for_kind("docker").kind(), "docker");
+        assert_eq!(crate::exec::runtime_for_kind("").kind(), "docker");
+    }
+
+    /// cluster 模式「本机也经 agent」的判据:只有 cluster + 配了 agent 才去特权。
+    /// 单机模式与 lab 降级(未配 AGENT_URL)必须保持历史行为(本机直连)。
+    #[test]
+    fn local_agent_only_in_cluster_with_agent_url() {
+        assert!(should_use_local_agent(true, Some("http://127.0.0.1:9413")));
+        assert!(!should_use_local_agent(false, Some("http://127.0.0.1:9413")), "单机模式不得去特权");
+        assert!(!should_use_local_agent(true, None), "无 agent 时保持本机直连(lab 降级)");
+        assert!(!should_use_local_agent(true, Some("   ")), "空白 agent 地址视为未配置");
+    }
+
+    /// 极小 future 阻塞执行(避免为一个断言引入 tokio runtime 宏)
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(fut)
     }
 }
 

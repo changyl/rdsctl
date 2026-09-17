@@ -47,11 +47,22 @@ const CLOCK_SAMPLE_WINDOW: usize = 16;
 const CLOCK_SAMPLE_TTL_MS: u64 = 10_000;
 /// 判定 A1 违规所需的持续超界样本数:单次延迟尖峰不足以判定
 const CLOCK_VIOLATION_MIN_SAMPLES: usize = 2;
+/// RTT/2 修正量的上限(ms)。
+///
+/// 修正量估计的是单程延迟,正常情况下不该有几千毫秒;设上限是为了防"一次被卡住的
+/// 投递(接近 3s 投递超时)把真实偏移整段抹平"。取 2000:远大于任何合理的控制面
+/// RTT(跨区也不过数百毫秒),又小于投递超时,慢消息不能完全抵消真偏移。
+const CLOCK_RTT_CORRECTION_CAP_MS: u64 = 2_000;
 
 /// 一次时钟偏移观测(带本地时刻;时间戳只用于"新鲜度"判定,不参与共识确定性)
 #[derive(Debug, Clone, Copy)]
 pub struct ClockSample {
+    /// 偏移估计(sender 时钟 − 本地时钟),**已按 RTT/2 剔除单程延迟**;判定一律用这个值
     pub offset_ms: i64,
+    /// 未修正的观测(含单程延迟;仅诊断展示)。远端报数时等于 `offset_ms`
+    pub raw_ms: i64,
+    /// 本机测得的 RTT(ms);0 = 没有本机 RTT 修正(老版本对端 / 远端报数)
+    pub rtt_ms: u64,
     pub at_ms: u64,
 }
 
@@ -126,6 +137,28 @@ impl RaftConfig {
         if self.max_skew_ms == 0 {
             return Err(HaError::Config("max_skew_ms 不能为 0(前提 A1)".into()));
         }
+        // 时间参数必须"同档":选举超时是"允许丢几拍心跳"的容错预算。
+        // 若心跳周期 ≥ 选举超时的一半,等于每拍都在赌网络 —— 同城勉强能跑,
+        // 跨区/跨 AZ(WAN RTT + 抖动)下直接表现成选主风暴(设计 §20 跨区发现)。
+        if self.heartbeat_ms == 0 {
+            return Err(HaError::Config("心跳周期不能为 0".into()));
+        }
+        if self.election_timeout_ms.0 == 0
+            || self.election_timeout_ms.1 < self.election_timeout_ms.0
+        {
+            return Err(HaError::Config(format!(
+                "选举超时区间非法:{:?}(需 0 < 下限 ≤ 上限)",
+                self.election_timeout_ms
+            )));
+        }
+        if self.heartbeat_ms.saturating_mul(2) > self.election_timeout_ms.0 {
+            return Err(HaError::Config(format!(
+                "心跳周期 {}ms 不得 ≥ 选举超时下限 {}ms 的一半(时间参数必须同档):\
+                 跨区/跨 AZ 部署请把两者一起放大,并保证选举超时 ≥ 4×实测 p99 RTT;\
+                 见 docs/control-plane-ha-design.md §20 跨区部署",
+                self.heartbeat_ms, self.election_timeout_ms.0
+            )));
+        }
         Ok(())
     }
 }
@@ -158,6 +191,9 @@ pub enum Message {
         granted: bool,
         #[serde(default)]
         sender_ms: u64,
+        /// 回显请求里的 `sender_ms`(= 发起方的 T1),供发起方算 RTT 并修正偏移(设计 §19)
+        #[serde(default)]
+        echo_ms: u64,
     },
     AppendEntries {
         term: u64,
@@ -169,6 +205,10 @@ pub enum Message {
         /// 发送方本地时间(ms):心跳天然是周期性探针 → 持续测量偏移
         #[serde(default)]
         sender_ms: u64,
+        /// leader 对**本 follower** 的修正后偏移估计(ms;0 = 未知)。
+        /// follower 无法自测 RTT,只能由 leader 回带(设计 §20 跨区发现)
+        #[serde(default)]
+        peer_skew_ms: u64,
     },
     AppendEntriesResp {
         term: u64,
@@ -179,6 +219,9 @@ pub enum Message {
         conflict_index: Option<u64>,
         #[serde(default)]
         sender_ms: u64,
+        /// 回显请求里的 `sender_ms`(= leader 的 T1),供 leader 算 RTT 并修正偏移(设计 §19)
+        #[serde(default)]
+        echo_ms: u64,
     },
     InstallSnapshot {
         term: u64,
@@ -611,6 +654,9 @@ impl Node {
             })
             .collect();
         let sender_ms = self.clock.now_ms();
+        // 回带"我对该 peer 的修正后偏移估计":follower 测不到 RTT,只能靠 leader 告知
+        // (设计 §20 跨区发现:否则 follower 会把单程延迟当成时钟偏移)。
+        let peer_skew_ms = self.peer_skew_estimate_ms(peer).unwrap_or(0);
         vec![Outbound {
             to: peer.to_string(),
             msg: Message::AppendEntries {
@@ -621,6 +667,7 @@ impl Node {
                 entries,
                 leader_commit: self.commit_index,
                 sender_ms,
+                peer_skew_ms,
             },
             critical: true,
         }]
@@ -697,6 +744,7 @@ impl Node {
                             voter: self.cfg.node_id.clone(),
                             granted,
                             sender_ms: my_ms,
+                            echo_ms: sender_ms,
                         },
                         critical: false,
                     }]);
@@ -709,6 +757,7 @@ impl Node {
                             voter: self.cfg.node_id.clone(),
                             granted: false,
                             sender_ms: my_ms,
+                            echo_ms: sender_ms,
                         },
                         critical: false,
                     }]);
@@ -731,6 +780,7 @@ impl Node {
                         voter: self.cfg.node_id.clone(),
                         granted,
                         sender_ms: self.clock.now_ms(),
+                        echo_ms: sender_ms,
                     },
                     critical: false,
                 }])
@@ -741,9 +791,10 @@ impl Node {
                 voter,
                 granted,
                 sender_ms,
+                echo_ms,
             } => {
                 self.peer_ack_ms.insert(voter.clone(), now);
-                self.observe_clock(&voter, sender_ms, now);
+                self.observe_clock_rtt(&voter, sender_ms, now, echo_ms);
                 if term != self.hard.current_term || !granted {
                     return Ok(Vec::new());
                 }
@@ -778,11 +829,24 @@ impl Node {
                 entries,
                 leader_commit,
                 sender_ms,
+                peer_skew_ms,
             } => {
                 self.peer_ack_ms.insert(leader.clone(), now);
-                self.observe_clock(&leader, sender_ms, now);
+                // 优先采信 leader 回带的**已修正**估计(follower 无 RTT 可测);
+                // 缺失(老版本对端)才退回单向上界口径(设计 §20 跨区发现)。
+                if peer_skew_ms > 0 {
+                    self.observe_peer_skew(&leader, peer_skew_ms, now);
+                } else {
+                    self.observe_clock(&leader, sender_ms, now);
+                }
                 if term < self.hard.current_term {
-                    return Ok(vec![self.append_resp(&leader, false, 0, Some(self.log.last_index()))]);
+                    return Ok(vec![self.append_resp(
+                        &leader,
+                        false,
+                        0,
+                        Some(self.log.last_index()),
+                        sender_ms,
+                    )]);
                 }
                 self.become_follower(term, Some(leader.clone()))?;
                 self.last_heartbeat_ms = now;
@@ -802,7 +866,7 @@ impl Node {
                             .saturating_sub(1)
                             .max(1)
                             .min(prev_log_index.max(1));
-                        return Ok(vec![self.append_resp(&leader, false, 0, Some(conflict))]);
+                        return Ok(vec![self.append_resp(&leader, false, 0, Some(conflict), sender_ms)]);
                     }
                 }
 
@@ -846,6 +910,7 @@ impl Node {
                     true,
                     self.log.last_index(),
                     None,
+                    sender_ms,
                 )])
             }
 
@@ -856,9 +921,10 @@ impl Node {
                 match_index,
                 conflict_index,
                 sender_ms,
+                echo_ms,
             } => {
                 self.peer_ack_ms.insert(follower.clone(), now);
-                self.observe_clock(&follower, sender_ms, now);
+                self.observe_clock_rtt(&follower, sender_ms, now, echo_ms);
                 if term > self.hard.current_term {
                     self.become_follower(term, None)?;
                     return Ok(Vec::new());
@@ -974,6 +1040,7 @@ impl Node {
         success: bool,
         match_index: u64,
         conflict_index: Option<u64>,
+        echo_ms: u64,
     ) -> Outbound {
         Outbound {
             to: to.to_string(),
@@ -984,6 +1051,7 @@ impl Node {
                 match_index,
                 conflict_index,
                 sender_ms: self.clock.now_ms(),
+                echo_ms,
             },
             critical: false,
         }
@@ -1205,18 +1273,49 @@ impl Node {
         std::fs::write(&probe, b"1").is_ok()
     }
 
-    /// 记录一次对 peer 的时钟偏移观测。
+    /// 记录一次对 peer 的时钟偏移观测(**无 RTT 修正**,单向口径)。
     ///
-    /// 估算口径:`offset ≈ sender_ms - 本地接收时刻`(含单向延迟,通常 ≪ max_skew)。
-    /// 记录一次对 peer 的偏移观测。
-    ///
-    /// **观测值 = 真实时钟偏移 + 这条消息的单程延迟**(延迟恒 ≥ 0),所以单次观测只是偏移的
-    /// **上界**;判定必须靠"窗口 + 最小延迟过滤 + 持续超界",不能靠最近一次(见字段注释)。
+    /// 估算口径:`offset ≈ sender_ms - 本地接收时刻`(含单向延迟)。延迟恒 ≥ 0,所以这只是
+    /// 偏移的**上界**;同城部署"通常 ≪ max_skew",跨区则单程 80~150ms 会变成常态偏差 ——
+    /// 因此能拿到 RTT 的路径一律走 `observe_clock_rtt`(设计 §20 跨区发现)。
     fn observe_clock(&mut self, peer: &str, sender_ms: u64, local_ms: u64) {
         if sender_ms == 0 {
             return; // 老版本/未带时间戳:不参与测量
         }
-        let offset = sender_ms as i64 - local_ms as i64;
+        let raw = sender_ms as i64 - local_ms as i64;
+        self.push_sample(peer, raw, raw, 0, local_ms);
+    }
+
+    /// 记录一次**带 RTT 修正**的观测(发起方视角)。
+    ///
+    /// 口径:本机发出请求时打 `T1 = echo_ms`,对端在 `T3 = sender_ms` 回包,本机在 `T4 = local_ms` 收到。
+    /// 原始单向观测 `raw = T3 − T4` 含有单程延迟(d2);`RTT = T4 − T1 ≈ d1 + d2`,
+    /// 故 `offset ≈ raw + RTT/2`(对称链路下即真实偏移)。
+    ///
+    /// 修正量按 `CLOCK_RTT_CORRECTION_CAP_MS` 封顶:只允许"把延迟减掉",不允许因一次被卡住的
+    /// 投递把真实偏移抹平(设计 §20 跨区发现)。
+    fn observe_clock_rtt(&mut self, peer: &str, sender_ms: u64, local_ms: u64, echo_ms: u64) {
+        if sender_ms == 0 || echo_ms == 0 {
+            // 对端未回显请求时间戳(老版本):退化为单向观测(上界)
+            self.observe_clock(peer, sender_ms, local_ms);
+            return;
+        }
+        let raw = sender_ms as i64 - local_ms as i64;
+        let rtt = local_ms.saturating_sub(echo_ms);
+        let corr = (rtt / 2).min(CLOCK_RTT_CORRECTION_CAP_MS) as i64;
+        self.push_sample(peer, raw.saturating_add(corr), raw, rtt, local_ms);
+    }
+
+    /// 采信**对端报来**的偏移估计(该值已在发起方用 RTT 修正过)。
+    ///
+    /// 为什么需要:只有"发起方"才知道 T1/T4,因此 follower 无法自测;由 leader 在每个心跳里
+    /// 带上"我对你的偏移估计",follower 即可得到与本人量测等价的值(A1 是双向对称的)。
+    fn observe_peer_skew(&mut self, peer: &str, skew_ms: u64, local_ms: u64) {
+        let v = skew_ms.min(i64::MAX as u64) as i64;
+        self.push_sample(peer, v, v, 0, local_ms);
+    }
+
+    fn push_sample(&mut self, peer: &str, offset_ms: i64, raw_ms: i64, rtt_ms: u64, at_ms: u64) {
         let w = self
             .peer_offset_samples
             .entry(peer.to_string())
@@ -1225,21 +1324,37 @@ impl Node {
             w.remove(0);
         }
         w.push(ClockSample {
-            offset_ms: offset,
-            at_ms: local_ms,
+            offset_ms,
+            raw_ms,
+            rtt_ms,
+            at_ms,
         });
     }
 
-    /// 某 peer 的**过滤后**偏移估计:在有效期内的样本里取 `|offset|` 最小的那个。
+    /// 某 peer 的**过滤后**偏移估计。
     ///
-    /// 依据:延迟只会让观测值变大,故最小者最接近真实偏移(NTP 的 clock-filter 思路);
-    /// 而**真实**偏移会出现在窗口内每个样本里,所以不会被滤掉 ——
-    /// 这也是它优于"滑动平均"的地方:平均会被尖峰拉偏,且阶跃式时钟调整要拖很久才反映出来。
+    /// 两条口径(按样本来源分流):
+    /// - 有本机 RTT 修正的样本(`rtt_ms > 0`):取 **RTT 最小**的那个样本的 `offset_ms`。
+    ///   这是 NTP clock-filter 的本意(延迟越小,估计越准)。**不能**在这里取 `|offset|` 最小:
+    ///   修正后的样本会因过修正而**偏小**,取最小等于系统性低估偏移(不安全方向)。
+    /// - 纯单向样本(老版本对端 / 远端回带):延迟只会让观测值变大,故取 `|offset|` 最小者。
+    ///
+    /// 这是设计 §20 跨区发现的原口径升级:同城 `≪ max_skew` 时单向上界够用,跨区必须去掉单程延迟。
     fn peer_offset_filtered(&self, peer: &str, now: u64) -> Option<i64> {
-        self.peer_offset_samples
+        let fresh: Vec<&ClockSample> = self
+            .peer_offset_samples
             .get(peer)?
             .iter()
             .filter(|s| now.saturating_sub(s.at_ms) <= CLOCK_SAMPLE_TTL_MS)
+            .collect();
+        if fresh.is_empty() {
+            return None;
+        }
+        if let Some(best) = fresh.iter().filter(|s| s.rtt_ms > 0).min_by_key(|s| s.rtt_ms) {
+            return Some(best.offset_ms);
+        }
+        fresh
+            .iter()
             .min_by_key(|s| s.offset_ms.unsigned_abs())
             .map(|s| s.offset_ms)
     }
@@ -1247,6 +1362,12 @@ impl Node {
     /// 某 peer 的**最新**采样(含单程延迟;只用于诊断展示,不参与判定)
     fn peer_offset_latest(&self, peer: &str) -> Option<ClockSample> {
         self.peer_offset_samples.get(peer)?.last().copied()
+    }
+
+    /// 某 peer 的修正后偏移估计(供 leader 在心跳里回带;见 `observe_peer_skew`)
+    pub fn peer_skew_estimate_ms(&self, peer: &str) -> Option<u64> {
+        let now = self.clock.now_ms();
+        self.peer_offset_filtered(peer, now).map(|v| v.unsigned_abs())
     }
 
     /// 某 peer 在有效窗口内的 `(超界样本数, 有效样本数)`
@@ -1289,7 +1410,9 @@ impl Node {
             }
             if let Some(s) = self.peer_offset_latest(peer) {
                 if now.saturating_sub(s.at_ms) <= CLOCK_SAMPLE_TTL_MS {
-                    let a = s.offset_ms.unsigned_abs();
+                    // 用**未修正**的原始观测做诊断值:它的口径与旧版一致(含单程延迟),
+                    // 与 `filt` 的差就是"被 RTT 修正剔掉的单程延迟量级"。
+                    let a = s.raw_ms.unsigned_abs();
                     latest = Some(latest.map_or(a, |b| b.max(a)));
                 }
             }
@@ -1636,6 +1759,7 @@ mod tests {
                 entries: Vec::new(),
                 leader_commit: 0, // 陈旧的 commit(比 follower 当前 commit 小)
                 sender_ms: leader.clock.now_ms(),
+                peer_skew_ms: 0,
             };
             self.queue.push_back((from.to_string(), to.to_string(), msg));
             true
@@ -2168,6 +2292,134 @@ mod tests {
         clock3.advance_ms(ttl);
         assert!(!n3.skew_exceeded(), "过期观测不得继续判超界");
         assert_eq!(n3.skew_measured_ms(), None, "过期后回到未测量");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 跨区回归:单程延迟**不得**被当成时钟偏移(设计 §20 跨区发现)。
+    ///
+    /// 场景:真实偏移 5ms、单程 150ms(RTT 300ms,跨区量级)。旧口径把单程延迟算进观测值
+    /// ⇒ 报 145ms;在 `max_skew_ms = 50`(同城口径的"安全"配置)下会**持续**判超界
+    /// ⇒ 拒绝授予任何实例租约(可用性事故,且报错会误导人"去修 NTP")。
+    /// 新口径用四时间戳消掉单程延迟 ⇒ 报 5ms。
+    #[test]
+    fn one_way_delay_is_removed_by_rtt_correction() {
+        let voters = vec!["n1".to_string(), "n2".to_string(), "n3".to_string()];
+        let dir = std::env::temp_dir().join(format!(
+            "rdsctl-rtt-skew-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let d = 150u64; // 单程延迟(WAN 量级)
+        let theta = 5i64; // 真实偏移(对端时钟比本机快 5ms)
+
+        // ① 旧口径(无 RTT 修正):单程延迟被算成偏移 —— 跨区误判的来源
+        let c1 = ManualClock::new(1_000_000);
+        let mut cfg1 = RaftConfig::new("n1", 0, voters.clone());
+        cfg1.max_skew_ms = 50; // 收得很紧:A1 的"同城安全值"
+        let mut raw_node = Node::open(cfg1, &dir.join("a"), Arc::new(c1.clone())).expect("open");
+        let t1 = c1.now_ms(); // 本机发出请求(T1)
+        let t3 = (t1 as i64 + d as i64 + theta) as u64; // 对端回包时刻(对端时钟)
+        let t4 = t1 + 2 * d; // 本机收到时刻(T4)
+        raw_node.observe_clock("n2", t3, t4);
+        raw_node.observe_clock("n2", t3, t4); // 持续样本(超界判定需要 ≥2 个)
+        assert_eq!(raw_node.skew_measured_ms(), Some(145), "旧口径把单程延迟算进偏移");
+        assert!(
+            raw_node.skew_exceeded(),
+            "max_skew=50 时旧口径会持续判超界 ⇒ 拒绝授予租约(跨区可用性事故)"
+        );
+
+        // ② 新口径(回显 T1 算 RTT):修正后还原真实偏移,不再误判
+        let c2 = ManualClock::new(1_000_000);
+        let mut cfg2 = RaftConfig::new("n1", 0, voters.clone());
+        cfg2.max_skew_ms = 50;
+        let mut fix_node = Node::open(cfg2, &dir.join("b"), Arc::new(c2.clone())).expect("open");
+        let t1 = c2.now_ms();
+        let t3 = (t1 as i64 + d as i64 + theta) as u64;
+        let t4 = t1 + 2 * d;
+        fix_node.observe_clock_rtt("n2", t3, t4, t1);
+        fix_node.observe_clock_rtt("n2", t3, t4, t1);
+        assert_eq!(
+            fix_node.skew_measured_ms(),
+            Some(theta.unsigned_abs()),
+            "RTT/2 修正后应还原真实偏移(5ms)"
+        );
+        assert!(!fix_node.skew_exceeded(), "修正后不得再判超界");
+        assert!(fix_node.clock_verified(), "修正后 A1 应视为已验证");
+        // 诊断值仍是**未修正**的原始观测 ⇒ 运维能看出"被剔掉的单程延迟量级"
+        let (filt, latest, _) = fix_node.skew_diag();
+        assert_eq!(filt, Some(5));
+        assert_eq!(latest, Some(145), "原始观测(含单程延迟)如实暴露在诊断里");
+
+        // ③ 修正量按上限封顶:一次被卡住的投递(接近投递超时)不得把真实偏移整段抹平
+        //    raw = -5000ms,rtt = 10s ⇒ 修正量封顶为 CLOCK_RTT_CORRECTION_CAP_MS(2000)
+        let c3 = ManualClock::new(5_000_000);
+        let mut cfg3 = RaftConfig::new("n1", 0, voters.clone());
+        cfg3.max_skew_ms = 50;
+        let mut cap_node = Node::open(cfg3, &dir.join("c"), Arc::new(c3.clone())).expect("open");
+        let now = c3.now_ms();
+        cap_node.observe_clock_rtt("n2", now.saturating_sub(5_000), now, now.saturating_sub(10_000));
+        assert_eq!(
+            cap_node.skew_measured_ms(),
+            Some(3_000),
+            "欠修正(封顶 2000)= 偏保守,真偏移仍能被看见,不会被一次卡顿抹平"
+        );
+
+        // ④ 回带链路:leader 把修正后的估计随心跳下发,follower 据此得到同样的值
+        let leader_est = fix_node.peer_skew_estimate_ms("n2");
+        assert_eq!(leader_est, Some(5), "leader 侧修正后估计 = 真实偏移");
+        let c4 = ManualClock::new(9_000_000);
+        let mut cfg4 = RaftConfig::new("n3", 0, voters.clone());
+        cfg4.max_skew_ms = 50;
+        let mut follower = Node::open(cfg4, &dir.join("d"), Arc::new(c4.clone())).expect("open");
+        let outs = follower.handle(
+            "n1",
+            Message::AppendEntries {
+                term: 1,
+                leader: "n1".into(),
+                prev_log_index: 0,
+                prev_log_term: 0,
+                entries: vec![],
+                leader_commit: 0,
+                sender_ms: 0,
+                peer_skew_ms: leader_est.unwrap(),
+            },
+        );
+        assert!(!outs.is_empty(), "follower 必须回 AppendEntriesResp");
+        assert_eq!(
+            follower.skew_measured_ms(),
+            Some(5),
+            "follower 无 RTT 可测,只能采信 leader 回带的修正值"
+        );
+        assert!(!follower.skew_exceeded(), "回带值正确时 follower 不得误判超界");
+
+        // ⑤ 回带字段缺失(老版本对端)⇒ 退回单向口径,不假装"已修正"
+        let c5 = ManualClock::new(11_000_000);
+        let mut cfg5 = RaftConfig::new("n3", 0, voters.clone());
+        cfg5.max_skew_ms = 50;
+        let mut old_peer = Node::open(cfg5, &dir.join("e"), Arc::new(c5.clone())).expect("open");
+        let now = c5.now_ms();
+        let _ = old_peer.handle(
+            "n1",
+            Message::AppendEntries {
+                term: 1,
+                leader: "n1".into(),
+                prev_log_index: 0,
+                prev_log_term: 0,
+                entries: vec![],
+                leader_commit: 0,
+                sender_ms: now.saturating_sub(145),
+                peer_skew_ms: 0,
+            },
+        );
+        assert_eq!(
+            old_peer.skew_measured_ms(),
+            Some(145),
+            "无回带值时退回单向上界口径(诚实,不伪装成已修正)"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

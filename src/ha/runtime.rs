@@ -11,7 +11,7 @@
 // 内部写入口。把实例生命周期(instance.rs)改造成**经由**共识租约与步骤账本,
 // 是 M1a 的后续项;在此之前 cluster 模式的业务 API 一律 503(不假装可用)。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +25,42 @@ use super::{HaError, HaResult};
 
 /// 单条内部 RPC 投递超时(ms):超过即视为该次投递失败,计入 transport_errors
 const DELIVER_TIMEOUT_MS: u64 = 3000;
+
+/// 提案转发(`/internal/propose`)的预算(ms)。
+///
+/// 必须**大于** leader 侧的"提案 + 等 apply"预算(`propose_with_flush` 最多 5s):
+/// 否则 follower 会把一次"其实已提交但提交得慢"的提案判成转发失败,跑去试下一个副本
+/// (重复提案虽然幂等,但会拖长客户端等待)。沿用改造前 `post_json` 的 10s 内部预算。
+const RPC_PROPOSE_TIMEOUT_MS: u64 = 10_000;
+
+/// `InstallSnapshot` 单条投递预算(ms)。
+///
+/// 为什么必须单独一档:心跳/日志条目是**小消息**,3s 足够;而整份快照是**一条**消息
+/// (`Message::InstallSnapshot { snapshot_json }`),3s 预算下跨区(乃至同城大状态机)
+/// 永远传不完 —— 表现为"落后副本永远追不上",而且串行投递时每轮都要赔上 3s,
+/// 把同一轮其它 peer 的心跳也一起推迟(跨区域部署的硬缺陷,见设计 §19)。
+/// 默认 300s,可用 `RDSCTL_SNAPSHOT_DELIVER_MS` 调整。
+///
+/// 仍未解决(后续项):快照未分块/不支持断点续传,超大快照会长时间占用一条连接。
+fn snapshot_deliver_timeout_ms() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("RDSCTL_SNAPSHOT_DELIVER_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(300_000)
+    })
+}
+
+/// 单条消息的投递预算:快照档 vs 普通档
+fn deliver_budget_ms(kind: &str) -> u64 {
+    if kind == "install_snapshot" {
+        snapshot_deliver_timeout_ms()
+    } else {
+        DELIVER_TIMEOUT_MS
+    }
+}
 
 /// 管控集群页的成员探测超时(ms)。
 ///
@@ -167,6 +203,8 @@ pub struct SelfCheck {
     pub fsync_ok: bool,
     pub clock_verified: bool,
     pub agent_fence_ok: bool,
+    /// A7:实测对端 RPC 往返与选举超时**同档**(设计 §20 跨区部署)
+    pub network_ok: bool,
     pub notes: Vec<String>,
     /// 是否满足全部前提(不满足时必须退出 2)
     pub all_ok: bool,
@@ -175,10 +213,14 @@ pub struct SelfCheck {
 impl SelfCheck {
     /// **阻断性**失败清单:已用 lab 开关显式放行的前提不再计入(但仍会在 `/readyz`
     /// 的 `premises_unverified` 中如实标注)。用于启动拒绝信息与日志,避免"已放行却仍报失败"的误导。
-    pub fn blocking_failures(&self, allow_clock: bool, allow_agent: bool) -> Vec<String> {
+    pub fn blocking_failures(&self, allow_clock: bool, allow_agent: bool, allow_network: bool) -> Vec<String> {
         let mut v = Vec::new();
         if !self.voters_ok {
-            v.push("集群配置非法(voter 必须奇数 ≥3、id 唯一且含自身)".into());
+            v.push(
+                "集群配置非法(voter 必须奇数 ≥3、id 唯一且含自身、心跳与选举超时同档;\
+                 具体原因见自检输出)"
+                    .into(),
+            );
         }
         if !self.data_dir_ok {
             v.push("数据目录不可写".into());
@@ -192,13 +234,24 @@ impl SelfCheck {
         if !self.agent_fence_ok && !allow_agent {
             v.push("执行面 agent 未就绪或未强制 fence(前提 A4;lab 可设 RDSCTL_ALLOW_NO_AGENT=1 降级)".into());
         }
+        if !self.network_ok && !allow_network {
+            v.push(
+                "网络往返与时间参数不同档(前提 A7:需 选举超时 ≥ 4×实测 RPC 往返);\
+                 lab 可设 RDSCTL_ALLOW_SLOW_NETWORK=1 放行"
+                    .into(),
+            );
+        }
         v
     }
 
     pub fn failures(&self) -> Vec<String> {
         let mut v = Vec::new();
         if !self.voters_ok {
-            v.push("集群配置非法(voter 必须奇数 ≥3、id 唯一且含自身)".into());
+            v.push(
+                "集群配置非法(voter 必须奇数 ≥3、id 唯一且含自身、心跳与选举超时同档;\
+                 具体原因见自检输出)"
+                    .into(),
+            );
         }
         if !self.data_dir_ok {
             v.push("数据目录不可写".into());
@@ -211,6 +264,13 @@ impl SelfCheck {
         }
         if !self.agent_fence_ok {
             v.push("执行面 agent 未就绪或未强制 fence(前提 A4;lab 可设 RDSCTL_ALLOW_NO_AGENT=1 降级)".into());
+        }
+        if !self.network_ok {
+            v.push(
+                "网络往返与时间参数不同档(前提 A7:需 选举超时 ≥ 4×实测 RPC 往返;\
+                 见 /readyz 的 network_note)"
+                    .into(),
+            );
         }
         v
     }
@@ -229,8 +289,12 @@ pub struct ClusterRuntime {
     selfcheck: SelfCheck,
     delivered: std::sync::atomic::AtomicU64,
     transport_errors: std::sync::atomic::AtomicU64,
-    /// tick 循环的出站投递是否在进行中(防止慢 peer 拖住心跳节拍;见 `spawn_background`)
-    delivering: std::sync::atomic::AtomicBool,
+    /// 出站投递的**按 peer** 在途集合(防止慢 peer 拖住心跳节拍;见 `spawn_background`)
+    ///
+    /// 为什么不是全局布尔:跨区/跨 AZ 部署下,单个慢 peer 会把全局标记一直占住,
+    /// 于是**同一轮对健康 peer 的心跳也被跳过** → 健康 follower 选举超时 → 选主风暴。
+    /// 按 peer 抑制只跳过"仍在途的那个 peer",其余 peer 照常收发(设计 §20 跨区发现)。
+    inflight: Mutex<BTreeSet<String>>,
 }
 
 impl ClusterRuntime {
@@ -239,6 +303,8 @@ impl ClusterRuntime {
         cfg: &RaftConfig,
         dir: &std::path::Path,
         agent_url: Option<&str>,
+        peers: Option<&MemberTable>,
+        token: Option<&str>,
     ) -> SelfCheck {
         let mut notes = Vec::new();
         let voters_ok = cfg.validate().is_ok();
@@ -282,13 +348,18 @@ impl ClusterRuntime {
         if !agent_fence_ok {
             notes.push("A4:未配置可达的 RDSCTL_AGENT_URL(或 agent 未声明 fence_capable)".into());
         }
-        let all_ok = voters_ok && data_dir_ok && fsync_ok && clock_verified && agent_fence_ok;
+        // A7:实测对端 RPC 往返必须与选举超时同档(设计 §20 跨区部署)。
+        let (network_ok, net_notes) = measure_peer_network(cfg, peers, token);
+        notes.extend(net_notes);
+        let all_ok =
+            voters_ok && data_dir_ok && fsync_ok && clock_verified && agent_fence_ok && network_ok;
         SelfCheck {
             voters_ok,
             data_dir_ok,
             fsync_ok,
             clock_verified,
             agent_fence_ok,
+            network_ok,
             notes,
             all_ok,
         }
@@ -302,7 +373,7 @@ impl ClusterRuntime {
         agent_url: Option<&str>,
         token: Option<String>,
     ) -> HaResult<Arc<Self>> {
-        let check = Self::self_check(&cfg, dir, agent_url);
+        let check = Self::self_check(&cfg, dir, agent_url, Some(&table), token.as_deref());
         if !check.all_ok && !lab_override_allows(&check) {
             return Err(HaError::Config(format!(
                 "启动自检未通过,拒绝进入 cluster 模式:\n  - {}",
@@ -329,7 +400,7 @@ impl ClusterRuntime {
             selfcheck: check,
             delivered: std::sync::atomic::AtomicU64::new(0),
             transport_errors: std::sync::atomic::AtomicU64::new(0),
-            delivering: std::sync::atomic::AtomicBool::new(false),
+            inflight: Mutex::new(BTreeSet::new()),
         });
         Ok(rt)
     }
@@ -357,34 +428,80 @@ impl ClusterRuntime {
                 // peer 就会把下一拍推到 3s 之后 —— 心跳停发 ⇒ follower 选举超时(600ms~1.2s)
                 // 必然触发 ⇒ 换主 ⇒ 新 leader 同样卡在投递上(选举风暴);
                 // 或者反向:F 收不到新 commit index,实例操作被"未追平"拒掉。
-                // 因此把本轮投递交给独立任务,并用 in-flight 标记防止任务无限堆积
-                // (上一轮还没投完就跳过本轮 —— Raft 对延迟/丢失是容错的,下一拍会重发)。
-                if me.delivering.swap(true, std::sync::atomic::Ordering::AcqRel) {
-                    tracing::debug!("上一轮投递未完成,跳过本轮出站投递(下一拍重发)");
+                // 因此把本轮投递交给独立任务,并按 **peer** 抑制重复投递(上一轮该 peer 还没投完
+                // 就跳过本轮对它的消息 —— Raft 对延迟/丢失是容错的,下一拍会重发)。
+                let send = me.claim_outbound(outs);
+                if send.is_empty() {
+                    tracing::debug!("本轮出站全部在途,跳过(下一拍重发)");
                     continue;
                 }
                 let me2 = Arc::clone(&me);
                 tokio::spawn(async move {
-                    me2.deliver(outs).await;
-                    me2.delivering.store(false, std::sync::atomic::Ordering::Release);
+                    me2.deliver(send).await;
                 });
             }
         });
     }
 
-    /// 投递出站消息(顺序投递,失败计入 transport_errors;不影响本节点自身状态机)
+    /// 认领本轮的出站消息:对周期性的 `AppendEntries` 做**按 peer** 在途抑制。
     ///
-    /// 采用迭代队列而非递归 spawn:避免"回发消息再 spawn"带来的 Send 约束问题,
-    /// 且投递顺序确定,便于故障复现。
+    /// 只抑制 AppendEntries:它是每 `heartbeat_ms` 重发的周期性消息,晚一拍无害;
+    /// 而 `RequestVote`/`TimeoutNow` 等一次性消息若被抑制会直接推迟选举(可用性损失),
+    /// 因此一律放行。
+    fn claim_outbound(&self, outs: Vec<Outbound>) -> Vec<Outbound> {
+        let mut keep: Vec<Outbound> = Vec::with_capacity(outs.len());
+        {
+            let mut inflight = self.inflight.lock();
+            for o in outs {
+                if matches!(o.msg, Message::AppendEntries { .. }) {
+                    if inflight.contains(&o.to) {
+                        continue; // 该 peer 上一轮还没投完,本轮跳过(下一拍重发)
+                    }
+                    inflight.insert(o.to.clone());
+                }
+                keep.push(o);
+            }
+        }
+        keep
+    }
+
+    /// 某条出站消息投递结束后清理在途标记(仅 AppendEntries 会登记)
+    fn release_outbound(&self, to: &str, kind: &str) {
+        if kind == "append_entries" {
+            self.inflight.lock().remove(to);
+        }
+    }
+
+    /// 投递出站消息(批内并发:延迟 = 最慢 peer,而不是各 peer 之和)
+    ///
+    /// 跨区/跨 AZ 部署下"各 peer 之和"是致命的:串行时一轮心跳 = Σ(2×RTT + 建连),
+    /// 三区可到 ~1s,逼近选举超时下限 → 选主风暴(设计 §20 跨区发现)。
     async fn deliver(&self, outs: Vec<Outbound>) {
+        // 兜底:本轮认领过的 AppendEntries peer 必须在**批结束时**一律放出。
+        // 正常路径已在单条投递完成时释放(见 `deliver_inner` + `release_outbound`),
+        // 这里是"任务异常/提前返回"时不让某个 peer 被**永久**抑制的保险 ——
+        // 永久抑制的后果极重:follower 再也收不到心跳 ⇒ 必然选主 ⇒ leader 反复更替。
+        let claimed: BTreeSet<String> = outs
+            .iter()
+            .filter(|o| matches!(o.msg, Message::AppendEntries { .. }))
+            .map(|o| o.to.clone())
+            .collect();
         let started = std::time::Instant::now();
         let kinds: Vec<String> = outs.iter().map(|o| o.msg.kind().to_string()).collect();
         let n_msgs = outs.len();
         self.deliver_inner(outs).await;
+        if !claimed.is_empty() {
+            let mut inflight = self.inflight.lock();
+            for p in &claimed {
+                inflight.remove(p);
+            }
+        }
         let el = started.elapsed();
         // 观测:一次投递超过一个心跳周期就已经在伤害可用性(心跳会晚发 → follower 选主)。
         // 阈值取 500ms(= 默认选举超时量级),超过就打 WARN 并带上消息种类,便于定位是谁慢。
-        if el.as_millis() >= 500 {
+        // 快照安装是**预期慢**的长消息,单独一档,不参与本告警以免淹没真信号。
+        let slow_only_snapshot = kinds.iter().all(|k| k == "install_snapshot");
+        if el.as_millis() >= 500 && !slow_only_snapshot {
             tracing::warn!(
                 "投递耗时 {}ms({} 条:{:?})—— 已超过心跳周期,可能推迟下一次心跳",
                 el.as_millis(),
@@ -397,51 +514,76 @@ impl ClusterRuntime {
     async fn deliver_inner(&self, outs: Vec<Outbound>) {
         let mut queue = outs;
         let mut budget = 4096usize;
-        while let Some(o) = queue.pop() {
-            if budget == 0 {
-                tracing::warn!("出站投递预算耗尽,丢弃剩余消息(疑似消息风暴)");
-                break;
-            }
-            budget -= 1;
-            let Some((ip, port)) = self.table.get(&o.to).cloned() else {
-                tracing::warn!("未知 peer {}:无法投递 {}", o.to, o.msg.kind());
-                self.transport_errors
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                continue;
-            };
-            let body = json!({ "from": self.node_id(), "msg": o.msg });
-            // 单条投递限时:卡住的 peer 不得拖死心跳/请求链(否则 leader 会误判失去多数派)
-            let sent = tokio::time::timeout(
-                Duration::from_millis(DELIVER_TIMEOUT_MS),
-                post_json(&ip, port, "/internal/raft", &body, self.token.as_deref()),
-            )
-            .await
-            .unwrap_or_else(|_| Err("投递超时".to_string()));
-            match sent {
-                Ok(v) => {
-                    self.delivered
+        let from = self.node_id();
+        while !queue.is_empty() {
+            // 一批并发投递:入站消息处理端返回的消息(投票/心跳响应)也走这里,
+            // 因此同一轮内的多个 peer 互不阻塞(设计 §20 跨区发现)。
+            let batch = std::mem::take(&mut queue);
+            let mut set = tokio::task::JoinSet::new();
+            for o in batch {
+                if budget == 0 {
+                    tracing::warn!("出站投递预算耗尽,丢弃剩余消息(疑似消息风暴)");
+                    break;
+                }
+                budget -= 1;
+                let Some((ip, port)) = self.table.get(&o.to).cloned() else {
+                    tracing::warn!("未知 peer {}:无法投递 {}", o.to, o.msg.kind());
+                    self.transport_errors
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if let Some(list) = v.get("out").and_then(|x| x.as_array()) {
-                        for item in list {
-                            if let (Some(to), Ok(msg)) = (
-                                item.get("to").and_then(|x| x.as_str()),
-                                serde_json::from_value::<Message>(
-                                    item.get("msg").cloned().unwrap_or(Value::Null),
-                                ),
-                            ) {
-                                queue.push(Outbound {
-                                    to: to.to_string(),
-                                    msg,
-                                    critical: false,
-                                });
+                    self.release_outbound(&o.to, o.msg.kind());
+                    continue;
+                };
+                let body = json!({ "from": from, "msg": o.msg });
+                let token = self.token.clone();
+                let kind = o.msg.kind().to_string();
+                let to = o.to.clone();
+                // 单条投递限时:卡住的 peer 不得拖死心跳/请求链(否则 leader 会误判失去多数派)。
+                // 快照单独一档:整份快照是**一条**消息,3s 预算下跨区永远装不完。
+                let budget_ms = deliver_budget_ms(&kind);
+                set.spawn(async move {
+                    let sent = tokio::time::timeout(
+                        Duration::from_millis(budget_ms),
+                        post_json(&ip, port, "/internal/raft", &body, token.as_deref(), budget_ms),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err("投递超时".to_string()));
+                    (to, kind, sent)
+                });
+            }
+            while let Some(joined) = set.join_next().await {
+                match joined {
+                    Ok((to, kind, Ok(v))) => {
+                        self.release_outbound(&to, &kind);
+                        self.delivered
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(list) = v.get("out").and_then(|x| x.as_array()) {
+                            for item in list {
+                                if let (Some(to), Ok(msg)) = (
+                                    item.get("to").and_then(|x| x.as_str()),
+                                    serde_json::from_value::<Message>(
+                                        item.get("msg").cloned().unwrap_or(Value::Null),
+                                    ),
+                                ) {
+                                    queue.push(Outbound {
+                                        to: to.to_string(),
+                                        msg,
+                                        critical: false,
+                                    });
+                                }
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    self.transport_errors
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tracing::debug!("投递 {} → {} 失败:{e}", o.msg.kind(), o.to);
+                    Ok((to, kind, Err(e))) => {
+                        self.release_outbound(&to, &kind);
+                        self.transport_errors
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::debug!("投递 {kind} → {to} 失败:{e}");
+                    }
+                    Err(e) => {
+                        self.transport_errors
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::debug!("投递任务异常退出:{e}");
+                    }
                 }
             }
         }
@@ -454,6 +596,11 @@ impl ClusterRuntime {
 
     pub fn node_id(&self) -> String {
         self.node.lock().cfg.node_id.clone()
+    }
+
+    /// 本节点的心跳周期(ms) —— 供启动期自检/告警核对"时间参数是否同档"
+    pub fn heartbeat_ms(&self) -> u64 {
+        self.node.lock().cfg.heartbeat_ms
     }
 
     /// 处理一条入站共识消息(返回需要回发的消息)
@@ -517,6 +664,10 @@ impl ClusterRuntime {
         if !self.selfcheck.agent_fence_ok {
             premises_unverified.push("A4_agent_fence".to_string());
         }
+        // A7:网络往返与时间参数是否同档(启动期实测;未测到对端时不假装已验证)
+        if !self.selfcheck.network_ok {
+            premises_unverified.push("A7_network".to_string());
+        }
         let premises_ok = premises_unverified.is_empty();
         let _ = degraded_reason; // Node 侧的单一原因由上面 reasons 全量重算,避免两处口径不一致
         let reason = reasons.first().map(|s| s.to_string());
@@ -549,6 +700,7 @@ impl ClusterRuntime {
                 "fsync_ok": self.selfcheck.fsync_ok,
                 "clock_verified": self.selfcheck.clock_verified,
                 "agent_fence_ok": self.selfcheck.agent_fence_ok,
+                "network_ok": self.selfcheck.network_ok,
                 "notes": self.selfcheck.notes,
             },
             "degraded_reason": reason,
@@ -1392,6 +1544,7 @@ impl ClusterRuntime {
                 "/internal/stepdown",
                 &json!({}),
                 self.token.as_deref(),
+                DELIVER_TIMEOUT_MS,
             ),
         )
         .await;
@@ -1616,7 +1769,16 @@ impl ClusterRuntime {
             };
             let body = serde_json::to_value(&op)
                 .map_err(|e| HaError::Transport(format!("op 序列化失败:{e}")))?;
-            match post_json(&ip, port, "/internal/propose", &body, self.token.as_deref()).await {
+            match post_json(
+                &ip,
+                port,
+                "/internal/propose",
+                &body,
+                self.token.as_deref(),
+                RPC_PROPOSE_TIMEOUT_MS,
+            )
+            .await
+            {
                 Ok(v) => {
                     if v["ok"] == Value::Bool(true) {
                         return Ok((v["index"].as_u64().unwrap_or(0), v["applied"].clone()));
@@ -1735,10 +1897,11 @@ impl ClusterRuntime {
                 fsync_ok: true,
                 clock_verified: false,
                 agent_fence_ok: false,
+                network_ok: true,
                 notes: vec![],
                 all_ok: false,
             },
-            delivering: std::sync::atomic::AtomicBool::new(false),
+            inflight: Mutex::new(BTreeSet::new()),
             delivered: std::sync::atomic::AtomicU64::new(0),
             transport_errors: std::sync::atomic::AtomicU64::new(0),
         }))
@@ -2184,11 +2347,20 @@ impl ClusterRuntime {
                 continue;
             };
             let me = Arc::clone(self);
+            // flush 里也可能夹带 InstallSnapshot(peer 落后到快照点之后),预算按消息种类分档
+            let budget_ms = deliver_budget_ms(o.msg.kind());
             handles.push(tokio::spawn(async move {
                 let body = json!({ "from": me.node_id(), "msg": o.msg });
                 let _ = tokio::time::timeout(
-                    Duration::from_millis(DELIVER_TIMEOUT_MS),
-                    post_json(&ip, port, "/internal/raft", &body, me.token.as_deref()),
+                    Duration::from_millis(budget_ms),
+                    post_json(
+                        &ip,
+                        port,
+                        "/internal/raft",
+                        &body,
+                        me.token.as_deref(),
+                        budget_ms,
+                    ),
                 )
                 .await;
             }));
@@ -2279,12 +2451,98 @@ fn applied_json(a: Applied) -> Value {
 fn lab_override_allows(check: &SelfCheck) -> bool {
     let allow_clock = std::env::var("RDSCTL_PREFLIGHT_ALLOW_UNVERIFIED_CLOCK").as_deref() == Ok("1");
     let allow_agent = std::env::var("RDSCTL_ALLOW_NO_AGENT").as_deref() == Ok("1");
+    let allow_network = std::env::var("RDSCTL_ALLOW_SLOW_NETWORK").as_deref() == Ok("1");
     // 结构性前提(配置/数据目录/fsync)永不放行
     check.voters_ok
         && check.data_dir_ok
         && check.fsync_ok
         && (!check.clock_verified && allow_clock || check.clock_verified)
         && (!check.agent_fence_ok && allow_agent || check.agent_fence_ok)
+        && (!check.network_ok && allow_network || check.network_ok)
+}
+
+/// 实测到某 peer 的**单次 RPC 往返**(ms):TCP 连接 + HTTP 请求/响应,与真实共识投递同构
+/// (含建连,因为共识路径当前**每条消息新建连接**)。失败返回 None。
+fn probe_peer_rpc_rtt_ms(ip: &str, port: u16, token: Option<&str>, timeout_ms: u64) -> Option<u64> {
+    use std::io::{Read, Write};
+    use std::net::ToSocketAddrs;
+    let sa = (ip, port).to_socket_addrs().ok()?.next()?;
+    let t0 = std::time::Instant::now();
+    let mut s = std::net::TcpStream::connect_timeout(&sa, Duration::from_millis(timeout_ms)).ok()?;
+    let _ = s.set_read_timeout(Some(Duration::from_millis(timeout_ms)));
+    let _ = s.set_write_timeout(Some(Duration::from_millis(timeout_ms)));
+    let mut req = format!("GET /healthz HTTP/1.1\r\nHost: {ip}\r\nConnection: close\r\n");
+    if let Some(t) = token {
+        req.push_str(&format!("X-Cluster-Token: {t}\r\n"));
+    }
+    req.push_str("\r\n");
+    s.write_all(req.as_bytes()).ok()?;
+    let mut buf = [0u8; 256];
+    if s.read(&mut buf).ok()? == 0 {
+        return None;
+    }
+    Some(t0.elapsed().as_millis() as u64)
+}
+
+/// 前提 A7:实测对端 RPC 往返,校验 **选举超时下限 ≥ 4 × 实测往返**。
+///
+/// 为什么是这项判据:选举超时是"允许丢几拍心跳"的容错预算。跨区部署时单次往返可达数百毫秒,
+/// 若时间参数不随之放大,就会表现为心跳间歇性迟到 ⇒ 频繁误选举 ⇒ 选主风暴(设计 §19)。
+///
+/// 只看**已响应**的 peer:一个都测不到时(首次引导/滚动升级期间对端未起)不阻断 ——
+/// 那个场景由 preflight 第 4 项"多数派可达"负责,不在这里重复判失败。
+fn measure_peer_network(
+    cfg: &RaftConfig,
+    peers: Option<&MemberTable>,
+    token: Option<&str>,
+) -> (bool, Vec<String>) {
+    let Some(t) = peers else {
+        return (true, vec!["A7 未测量:未提供成员表".to_string()]);
+    };
+    let budget = (cfg.election_timeout_ms.0 / 4).max(1);
+    let mut notes = Vec::new();
+    let mut ok = true;
+    let mut measured = 0usize;
+    for (id, (ip, port)) in t.addrs.iter() {
+        if id == &cfg.node_id {
+            continue;
+        }
+        let mut best: Option<u64> = None;
+        let mut reached = 0usize;
+        for _ in 0..3 {
+            if let Some(ms) = probe_peer_rpc_rtt_ms(ip, *port, token, 3_000) {
+                reached += 1;
+                best = Some(best.map_or(ms, |b| b.min(ms)));
+            }
+        }
+        if reached == 0 {
+            continue; // 对端未起:不在此判失败(见函数注释)
+        }
+        measured += 1;
+        let ms = best.unwrap_or(0);
+        if ms > budget {
+            ok = false;
+            notes.push(format!(
+                "A7:peer {id} 实测 RPC 往返 {ms}ms > 选举超时下限的四分之一({budget}ms);\
+                 请把 RDSCTL_ELECTION_TIMEOUT_MS 放大到 ≥ {}ms(跨区建议 ≥ {}ms)",
+                ms.saturating_mul(4).max(1_500),
+                ms.saturating_mul(8).max(3_000)
+            ));
+        }
+        if reached < 3 {
+            notes.push(format!(
+                "A7:peer {id} 三次探测仅 {reached} 次成功(WAN 丢包会放大成误选举,建议排查链路)"
+            ));
+        }
+    }
+    if measured == 0 {
+        notes.push(
+            "A7 未测量:无对端响应(首次引导/升级期间属预期;上线后必须复测——\
+             跨区部署的时间参数必须按实测 RTT 定档)"
+                .into(),
+        );
+    }
+    (ok, notes)
 }
 
 /// 探测本机 NTP 同步状态(与 deploy 脚本同判据;无法判定返回 None)
@@ -2482,12 +2740,17 @@ async fn get_json(
 }
 
 /// 手写 HTTP JSON POST(集群内部 RPC)
+///
+/// `timeout_ms` 必须由调用方给出:普通共识消息用 `DELIVER_TIMEOUT_MS`(3s),
+/// 而整份快照的 InstallSnapshot 是**一条**长消息,3s 预算下跨区永远传不完
+/// (设计 §20 跨区发现)。这里不做"内部默认值",避免调用点忘记给预算。
 async fn post_json(
     host: &str,
     port: u16,
     path: &str,
     payload: &Value,
     token: Option<&str>,
+    timeout_ms: u64,
 ) -> Result<Value, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let body = payload.to_string();
@@ -2515,9 +2778,9 @@ async fn post_json(
         }
         Ok::<Vec<u8>, std::io::Error>(buf)
     };
-    let raw = tokio::time::timeout(Duration::from_secs(10), fut)
+    let raw = tokio::time::timeout(Duration::from_millis(timeout_ms), fut)
         .await
-        .map_err(|_| "RPC 超时".to_string())?
+        .map_err(|_| format!("RPC 超时({timeout_ms}ms)"))?
         .map_err(|e| format!("RPC 连接失败: {e}"))?;
     let text = String::from_utf8_lossy(&raw).into_owned();
     let head_end = text.find("\r\n\r\n").map(|p| p + 4).unwrap_or(0);
@@ -2707,17 +2970,136 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // 偶数 voter → 结构前提不达标(不可被 lab 放行)
         let cfg = RaftConfig::new("n1", 0, vec!["n1".into(), "n2".into()]);
-        let c = ClusterRuntime::self_check(&cfg, &dir, None);
+        let c = ClusterRuntime::self_check(&cfg, &dir, None, None, None);
         assert!(!c.voters_ok);
         assert!(!c.all_ok);
         assert!(!lab_override_allows(&c), "结构性问题不得被 lab 放行");
         // 奇数 voter + 无 agent + 未放行时钟 → 不达标但可 lab 放行
         let cfg2 = RaftConfig::new("n1", 0, vec!["n1".into(), "n2".into(), "n3".into()]);
-        let c2 = ClusterRuntime::self_check(&cfg2, &dir, None);
+        let c2 = ClusterRuntime::self_check(&cfg2, &dir, None, None, None);
         assert!(c2.voters_ok && c2.data_dir_ok && c2.fsync_ok);
         assert!(!c2.clock_verified && !c2.agent_fence_ok);
         assert!(!c2.all_ok);
         assert!(c2.failures().iter().any(|f| f.contains("A1")));
         assert!(c2.failures().iter().any(|f| f.contains("A4")));
+    }
+
+    /// 跨区回归:心跳的"在途抑制"必须**按 peer**,不能是全局开关。
+    ///
+    /// 旧实现用一个全局 `delivering` 布尔:一个慢 peer(跨区 RTT 大,或正在传快照)会把标记
+    /// 一直占住,于是**同一轮对健康 peer 的心跳也被跳过** → 健康 follower 选举超时 → 选主风暴。
+    #[test]
+    fn inflight_suppression_is_per_peer_and_never_delays_elections() {
+        let dir = std::env::temp_dir().join(format!("rdsctl-inflight-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let table = MemberTable::parse("n1@127.0.0.1:1,n2@127.0.0.1:2,n3@127.0.0.1:3").unwrap();
+        let cfg = RaftConfig::new("n1", 0, table.ids());
+        let rt = ClusterRuntime::start_for_test(cfg, table, &dir).expect("start");
+
+        let append = |to: &str| Outbound {
+            to: to.to_string(),
+            msg: Message::AppendEntries {
+                term: 1,
+                leader: "n1".into(),
+                prev_log_index: 0,
+                prev_log_term: 0,
+                entries: vec![],
+                leader_commit: 0,
+                sender_ms: 0,
+                peer_skew_ms: 0,
+            },
+            critical: true,
+        };
+
+        // 首轮:两个 peer 的心跳都要发出去,并标记在途
+        let keep = rt.claim_outbound(vec![append("n2"), append("n3")]);
+        assert_eq!(keep.len(), 2, "不同 peer 的心跳互不抑制");
+
+        // 第二轮:两个都还在途 ⇒ 均跳过(Raft 对丢失容错,下一拍重发)
+        assert!(rt.claim_outbound(vec![append("n2"), append("n3")]).is_empty());
+
+        // 关键:n2 投递完成、n3 仍卡住 ⇒ 只放开 n2,n3 继续被抑制
+        rt.release_outbound("n2", "append_entries");
+        let keep = rt.claim_outbound(vec![append("n2"), append("n3")]);
+        assert_eq!(keep.len(), 1);
+        assert_eq!(
+            keep[0].to, "n2",
+            "卡住的 peer 不得连带抑制健康 peer 的心跳(否则健康 follower 会选主)"
+        );
+
+        // 选举类消息**一律不抑制**:抑制它会直接推迟选举(可用性损失)
+        let vote = Outbound {
+            to: "n3".to_string(),
+            msg: Message::RequestVote {
+                term: 2,
+                candidate: "n1".into(),
+                last_log_index: 0,
+                last_log_term: 0,
+                pre_vote: true,
+                sender_ms: 1,
+            },
+            critical: true,
+        };
+        let keep = rt.claim_outbound(vec![vote]);
+        assert_eq!(keep.len(), 1, "RequestVote 不得被在途抑制挡住");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 跨区回归:前提 A7 —— 实测 RPC 往返超出"选举超时下限/4"时,启动自检必须不达标;
+    /// 把选举超时按实测 RTT 放大后,同一条链路必须达标(否则部署方只会看到"莫名其妙拒绝启动")。
+    #[test]
+    fn slow_peer_network_fails_self_check_until_timeouts_are_widened() {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let mut s = match s {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut b = [0u8; 1024];
+                let _ = s.read(&mut b);
+                std::thread::sleep(Duration::from_millis(200)); // 模拟跨区 RPC 往返
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("rdsctl-net-pre-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let table =
+            MemberTable::parse(&format!("n1@127.0.0.1:1,n2@127.0.0.1:{port},n3@127.0.0.1:1"))
+                .unwrap();
+
+        // 选举下限 400ms ⇒ 预算 100ms < 实测 ~200ms ⇒ A7 不达标
+        let mut cfg = RaftConfig::new("n1", 0, table.ids());
+        cfg.election_timeout_ms = (400, 800);
+        cfg.heartbeat_ms = 100;
+        let c = ClusterRuntime::self_check(&cfg, &dir, None, Some(&table), None);
+        assert!(!c.network_ok, "实测往返超预算时 A7 必须不达标");
+        assert!(!c.all_ok);
+        assert!(c.failures().iter().any(|f| f.contains("A7")));
+        assert!(
+            c.notes.iter().any(|n| n.starts_with("A7") && n.contains("peer n2")),
+            "必须给出可执行的修法(实测值 + 建议的时间参数):{:?}",
+            c.notes
+        );
+
+        // 按实测放大选举超时(4000ms ⇒ 预算 1000ms)⇒ 同一条链路达标
+        let mut cfg2 = RaftConfig::new("n1", 0, table.ids());
+        cfg2.election_timeout_ms = (4_000, 8_000);
+        cfg2.heartbeat_ms = 300;
+        let c2 = ClusterRuntime::self_check(&cfg2, &dir, None, Some(&table), None);
+        assert!(c2.network_ok, "放大时间参数后必须达标:{:?}", c2.notes);
+
+        // 未测量(无对端响应)不算不达标:首次引导期间对端本就还没起
+        let cold = MemberTable::parse("n1@127.0.0.1:1,n2@127.0.0.1:1,n3@127.0.0.1:1").unwrap();
+        let c3 = ClusterRuntime::self_check(&cfg, &dir, None, Some(&cold), None);
+        assert!(c3.network_ok, "对端全未起时不得阻断(由 preflight 第 4 项负责)");
+        assert!(c3.notes.iter().any(|n| n.contains("A7 未测量")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

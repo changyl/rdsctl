@@ -23,14 +23,17 @@
 
 use serde_json::{json, Value};
 use std::io;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::exec::{self, ExecMeta, RuntimeError, WorkloadRuntime};
+
 const HEADER_TOKEN: &str = "x-agent-token";
 /// 执行面 fence 令牌头(设计 §9.2):`<shard>:<term>:<index>`
-const HEADER_FENCE: &str = "x-rdsctl-fence";
+const HEADER_FENCE: &str = exec::HEADER_FENCE;
 /// 幂等键头:同键重复请求直接回放首次结果
-const HEADER_IDEM: &str = "x-rdsctl-idem";
+const HEADER_IDEM: &str = exec::HEADER_IDEM;
 
 /// 控制端/agent 共用的 token(env RDSCTL_AGENT_TOKEN;空 = 不鉴权)
 pub fn token_opt() -> Option<String> {
@@ -47,24 +50,26 @@ pub fn agent_url(ip: &str, port: u16) -> String {
 
 // ═════════════════════════ 服务端(agent 模式) ═════════════════════════
 
-pub async fn serve(port: u16) -> io::Result<()> {
+pub async fn serve(port: u16, rt: Arc<dyn WorkloadRuntime>) -> io::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     let token = token_opt();
     // 执行面守卫:检测并落地 fence_seen / 幂等缓存(设计 §9.2)
-    let guard = std::sync::Arc::new(crate::ha::fence::ExecutorGuard::from_env());
+    let guard = Arc::new(crate::ha::fence::ExecutorGuard::from_env());
     let fence_required = fence_required();
     tracing::info!(
-        "rdsctl agent listening on 0.0.0.0:{port} (token: {}, fence: {})",
+        "rdsctl agent listening on 0.0.0.0:{port} (token: {}, fence: {}, runtime: {})",
         if token.is_some() { "on" } else { "off" },
-        if fence_required { "required" } else { "optional" }
+        if fence_required { "required" } else { "optional" },
+        rt.kind()
     );
     tracing::info!("执行面数据目录:{}", guard.root().display());
     loop {
         let (mut stream, _) = listener.accept().await?;
         let token = token.clone();
-        let guard = std::sync::Arc::clone(&guard);
+        let guard = Arc::clone(&guard);
+        let rt = Arc::clone(&rt);
         tokio::spawn(async move {
-            if let Err(e) = handle(&mut stream, token.as_deref(), &guard).await {
+            if let Err(e) = handle(&mut stream, token.as_deref(), &guard, &rt).await {
                 tracing::debug!("agent conn error: {e}");
             }
         });
@@ -80,6 +85,7 @@ async fn handle(
     stream: &mut TcpStream,
     token: Option<&str>,
     guard: &crate::ha::fence::ExecutorGuard,
+    rt: &Arc<dyn WorkloadRuntime>,
 ) -> io::Result<()> {
     let mut buf = [0u8; 8192];
     let n = stream.read(&mut buf).await?;
@@ -149,6 +155,9 @@ async fn handle(
             &json!({
                 "ok": true,
                 "host": host,
+                "runtime": rt.kind(),
+                "version": env!("CARGO_PKG_VERSION"),
+                "caps": rt.caps(),
                 "fence_capable": true,
                 "fence_required": fence_required(),
                 "fence_seen_max": guard.seen_max().map(|f| f.wire()),
@@ -158,13 +167,34 @@ async fn handle(
         )
         .await;
     }
+    if method == "GET" && path == "/agent/caps" {
+        return reply(
+            stream,
+            200,
+            &json!({ "ok": true, "runtime": rt.kind(), "caps": rt.caps() }).to_string(),
+        )
+        .await;
+    }
     if method != "POST" {
         return reply(stream, 405, r#"{"ok":false,"error":"仅支持 POST"}"#).await;
     }
     // 需要 fence 的变更类端点:先做幂等短路,再做 fence 强制(设计 §9.2)
     let mutating = matches!(
         path.as_str(),
-        "/agent/run" | "/agent/rm" | "/agent/exec" | "/agent/sql" | "/agent/docker"
+        "/agent/run"
+            | "/agent/rm"
+            | "/agent/remove"
+            | "/agent/create"
+            | "/agent/start"
+            | "/agent/stop"
+            | "/agent/restart"
+            | "/agent/rename"
+            | "/agent/exec"
+            | "/agent/sql"
+            | "/agent/write_file"
+            | "/agent/network/ensure"
+            | "/agent/network/remove"
+            | "/agent/docker"
     );
     if mutating {
         if let Some(idem) = &h_idem {
@@ -173,7 +203,7 @@ async fn handle(
                 return reply(stream, 200, &cached).await;
             }
         }
-        let key = payload["container"].as_str().unwrap_or("docker").to_string();
+        let key = fence_key(&payload);
         match &h_fence {
             Some(raw) => match crate::ha::Fence::parse(raw) {
                 Some(f) => {
@@ -218,82 +248,147 @@ async fn handle(
         }
     }
 
+    // fence/幂等元信息:变更类原语经此透传到本机执行后端
+    let meta = ExecMeta {
+        fence: h_fence.as_deref().and_then(crate::ha::Fence::parse),
+        idem: h_idem.clone(),
+    };
+
     let resp: Value = match path.as_str() {
-        "/agent/docker" => {
-            let args: Vec<&str> = payload
-                .get("args")
-                .and_then(|a| a.as_array())
-                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-                .unwrap_or_default();
-            run_docker(&args).await
+        // ── 平台无关原语(推荐)──
+        "/agent/create" => match serde_json::from_value::<exec::ContainerSpec>(payload["spec"].clone()) {
+            Ok(spec) => unit(rt.create(&spec, &meta).await),
+            Err(e) => json!({ "ok": false, "error": format!("spec 解析失败: {e}") }),
+        },
+        "/agent/start" => unit(rt.start(id_of(&payload), &meta).await),
+        "/agent/stop" => unit(rt.stop(id_of(&payload), &meta).await),
+        "/agent/restart" => unit(rt.restart(id_of(&payload), &meta).await),
+        "/agent/remove" | "/agent/rm" => {
+            let id = id_of(&payload);
+            if id.is_empty() {
+                json!({ "ok": false, "error": "缺少 container/id" })
+            } else {
+                unit(rt.remove(id, payload["purge"].as_bool().unwrap_or(false), &meta).await)
+            }
+        }
+        "/agent/rename" => {
+            let from = payload["from"].as_str().unwrap_or("");
+            let to = payload["to"].as_str().unwrap_or("");
+            if from.is_empty() || to.is_empty() {
+                json!({ "ok": false, "error": "缺少 from/to" })
+            } else {
+                unit(rt.rename(from, to, &meta).await)
+            }
+        }
+        "/agent/exists" => json!({ "ok": true, "exists": rt.exists(id_of(&payload)).await }),
+        "/agent/state" => match rt.state(id_of(&payload)).await {
+            Some(st) => json!({ "ok": true, "state": st.wire(), "health": st.health }),
+            None => json!({ "ok": true, "state": Value::Null }),
+        },
+        "/agent/health" => match rt.health(id_of(&payload)).await {
+            Ok(h) => json!({ "ok": true, "health": h }),
+            Err(e) => err_json(e),
+        },
+        "/agent/logs" => {
+            let tail = payload["tail"].as_u64().unwrap_or(40) as usize;
+            match rt.logs(id_of(&payload), tail).await {
+                Ok(o) => ok_out(o),
+                Err(e) => err_json(e),
+            }
+        }
+        "/agent/exec" => {
+            let c = id_of(&payload);
+            let args = argv_of(&payload, "args");
+            if c.is_empty() {
+                json!({ "ok": false, "error": "缺少 container" })
+            } else {
+                match rt.exec(c, &args).await {
+                    Ok(o) => ok_out(o),
+                    Err(e) => err_json(e),
+                }
+            }
+        }
+        "/agent/exec_raw" => {
+            let c = id_of(&payload);
+            let args = argv_of(&payload, "argv");
+            if c.is_empty() {
+                json!({ "ok": false, "error": "缺少 container" })
+            } else {
+                match rt.exec_raw(c, &args).await {
+                    Ok(o) => json!({ "ok": true, "out": o.stdout, "err": o.stderr, "code": o.exit_code }),
+                    Err(e) => err_json(e),
+                }
+            }
         }
         "/agent/sql" => {
-            let c = payload["container"].as_str().unwrap_or("");
+            let c = id_of(&payload);
             let u = payload["user"].as_str().unwrap_or("");
             let p = payload["pass"].as_str().unwrap_or("");
             let s = payload["sql"].as_str().unwrap_or("");
             if c.is_empty() || s.is_empty() {
                 json!({ "ok": false, "error": "缺少 container/sql" })
             } else {
-                let r = crate::docker::exec_mysql_local(c, u, p, s).await;
-                match r {
-                    Ok(out) => json!({ "ok": true, "out": out }),
-                    Err(e) => json!({ "ok": false, "error": e }),
+                match rt.exec_mysql_local(c, u, p, s).await {
+                    Ok(o) => ok_out(o),
+                    Err(e) => err_json(e),
                 }
             }
         }
-        "/agent/exec" => {
-            let c = payload["container"].as_str().unwrap_or("");
-            let args: Vec<String> = payload
-                .get("args")
-                .and_then(|a| a.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if c.is_empty() {
-                json!({ "ok": false, "error": "缺少 container" })
+        "/agent/write_file" => {
+            let c = id_of(&payload);
+            let path = payload["path"].as_str().unwrap_or("");
+            let content = payload["content"].as_str().unwrap_or("");
+            if c.is_empty() || path.is_empty() {
+                json!({ "ok": false, "error": "缺少 id/path" })
             } else {
-                match crate::docker::exec_in(c, &args).await {
-                    Ok(out) => json!({ "ok": true, "out": out }),
-                    Err(e) => json!({ "ok": false, "error": e }),
-                }
+                unit(rt.write_file(c, path, content).await)
             }
         }
-        "/agent/state" => {
-            let c = payload["container"].as_str().unwrap_or("");
-            match crate::docker::container_state(c).await {
-                Some(st) => json!({ "ok": true, "state": st }),
-                None => json!({ "ok": true, "state": Value::Null }),
+        "/agent/network/ensure" => {
+            let name = payload["name"].as_str().unwrap_or("");
+            if name.is_empty() {
+                json!({ "ok": false, "error": "缺少 name" })
+            } else {
+                unit(rt.network_ensure(name, &meta).await)
             }
         }
+        "/agent/network/remove" => {
+            let name = payload["name"].as_str().unwrap_or("");
+            if name.is_empty() {
+                json!({ "ok": false, "error": "缺少 name" })
+            } else {
+                unit(rt.network_remove(name, &meta).await)
+            }
+        }
+        "/agent/expose" => match serde_json::from_value::<exec::ContainerSpec>(payload["spec"].clone()) {
+            Ok(spec) => match rt.expose(&spec).await {
+                Ok(addr) => json!({ "ok": true, "addr": addr }),
+                Err(e) => err_json(e),
+            },
+            Err(e) => json!({ "ok": false, "error": format!("spec 解析失败: {e}") }),
+        },
+        // ── 历史别名(旧控制面 / 既有测试兼容;语义与上面完全一致)──
         "/agent/run" => {
             let c = payload["container"].as_str().unwrap_or("");
-            let args: Vec<&str> = payload
-                .get("args")
-                .and_then(|a| a.as_array())
-                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-                .unwrap_or_default();
+            let args = argv_of(&payload, "args");
             if c.is_empty() {
                 json!({ "ok": false, "error": "缺少 container" })
             } else {
-                match crate::docker::run(c, &args).await {
-                    Ok(()) => json!({ "ok": true }),
-                    Err(e) => json!({ "ok": false, "error": e }),
+                let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                match exec::spec::docker_args_to_spec(c, &refs) {
+                    Ok(spec) => unit(rt.create(&spec, &meta).await),
+                    Err(e) => err_json(e),
                 }
             }
         }
-        "/agent/rm" => {
-            let c = payload["container"].as_str().unwrap_or("");
-            if c.is_empty() {
-                json!({ "ok": false, "error": "缺少 container" })
+        "/agent/docker" => {
+            // **已废弃**:裸 CLI 透传只是 docker 后端的兼容出口,平台无关路径请用原语端点
+            if rt.kind() != "docker" {
+                json!({ "ok": false, "error": "/agent/docker 已废弃,且本机后端不是 docker", "code": "unsupported", "cap": "raw_flags" })
             } else {
-                match crate::docker::rm(c).await {
-                    Ok(()) => json!({ "ok": true }),
-                    Err(e) => json!({ "ok": false, "error": e }),
-                }
+                let args = argv_of(&payload, "args");
+                let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                run_docker(&refs).await
             }
         }
         _ => json!({ "ok": false, "error": format!("未知路径 {path}") }),
@@ -307,10 +402,65 @@ async fn handle(
     reply(stream, 200, &resp.to_string()).await
 }
 
+/// 工作负载标识:新端点用 `id`,历史端点用 `container`
+fn id_of(payload: &Value) -> &str {
+    payload["id"]
+        .as_str()
+        .or_else(|| payload["container"].as_str())
+        .unwrap_or("")
+}
+
+/// fence/幂等**作用域键**:按资源标识取(设计 §9.2 的 per-resource 单调性)。
+///
+/// 必须覆盖各端点携带标识的写法,否则 `/agent/create`(标识在 `spec.name`)
+/// 会退化成同一个键,导致不同容器的 fence 相互干扰。
+fn fence_key(payload: &Value) -> String {
+    payload["id"]
+        .as_str()
+        .or_else(|| payload["container"].as_str())
+        .or_else(|| payload["spec"]["name"].as_str())
+        .or_else(|| payload["from"].as_str())
+        .or_else(|| payload["name"].as_str())
+        .unwrap_or("docker")
+        .to_string()
+}
+
+/// 字符串数组参数(历史端点 `args` / 新端点 `argv`)
+fn argv_of(payload: &Value, key: &str) -> Vec<String> {
+    payload
+        .get(key)
+        .and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn ok_out(out: String) -> Value {
+    json!({ "ok": true, "out": out })
+}
+
+/// 结构化错误上线:保留文案,并带上 code/cap 让控制面还原 `Unsupported`(fail-closed 跨进程传递)
+fn err_json(e: RuntimeError) -> Value {
+    let (code, cap) = exec::error_code_of(&e);
+    json!({ "ok": false, "error": e.to_string(), "code": code, "cap": cap })
+}
+
+fn unit(r: Result<(), RuntimeError>) -> Value {
+    match r {
+        Ok(()) => json!({ "ok": true }),
+        Err(e) => err_json(e),
+    }
+}
+
+/// 裸 CLI 透传(仅 `/agent/docker` 废弃端点使用;始终走本机配置的 CLI)
 async fn run_docker(args: &[&str]) -> Value {
-    match crate::docker::docker(args).await {
+    let cli = exec::docker::DockerRuntime::from_env();
+    match cli.cli_raw(args).await {
         Ok(out) => json!({ "ok": true, "out": out }),
-        Err(e) => json!({ "ok": false, "error": e }),
+        Err(e) => err_json(e),
     }
 }
 
@@ -333,46 +483,11 @@ async fn reply(stream: &mut TcpStream, status: u16, body: &str) -> io::Result<()
 
 // ═════════════════════════ 客户端(控制端) ═════════════════════════
 
-/// 调用的 fence/幂等元信息(设计 §9.2 的 X-Rdsctl-Fence / X-Rdsctl-Idem)
+/// 调用的 fence/幂等元信息(设计 §9.2 的 X-Rdsctl-Fence / X-Rdsctl-Idem)。
 ///
-/// 这些构造器供 M1a 后续接线(instance.rs 的 r_run/r_rm/r_exec/r_sql 传 fence)使用;
-/// 未接线前保留以免每次改动都要重写签名。
-#[allow(dead_code)]
-#[derive(Clone, Debug, Default)]
-pub struct CallMeta {
-    pub fence: Option<crate::ha::Fence>,
-    pub idem: Option<String>,
-}
-
-#[allow(dead_code)]
-impl CallMeta {
-    pub fn none() -> Self {
-        Self::default()
-    }
-
-    pub fn fenced(fence: crate::ha::Fence) -> Self {
-        Self {
-            fence: Some(fence),
-            idem: None,
-        }
-    }
-
-    pub fn with_idem(mut self, idem: impl Into<String>) -> Self {
-        self.idem = Some(idem.into());
-        self
-    }
-
-    fn headers(&self) -> Vec<(String, String)> {
-        let mut h = Vec::new();
-        if let Some(f) = &self.fence {
-            h.push((HEADER_FENCE.to_string(), f.wire()));
-        }
-        if let Some(i) = &self.idem {
-            h.push((HEADER_IDEM.to_string(), i.clone()));
-        }
-        h
-    }
-}
+/// 与执行面抽象共用同一类型(`crate::exec::ExecMeta`):抽象化之后 fence 语义
+/// 仍然穿过 `WorkloadRuntime`,不因平台无关化而丢。
+pub type CallMeta = ExecMeta;
 
 /// 远端 agent 句柄(url + token)
 #[derive(Clone, Debug)]
@@ -407,6 +522,29 @@ impl Agent {
             &meta.headers(),
         )
         .await
+    }
+
+    /// 平台无关原语调用(`crate::exec::agent::AgentRuntime` 用):
+    /// 成功返回响应 JSON;失败把 `code`/`cap` 还原成结构化 [`RuntimeError`],
+    /// 使 `Unsupported` 这类 fail-closed 语义能跨进程传递。
+    pub async fn rt_call(
+        &self,
+        path: &str,
+        payload: Value,
+        meta: &CallMeta,
+    ) -> Result<Value, RuntimeError> {
+        let v = self
+            .post_meta(path, &payload, meta)
+            .await
+            .map_err(RuntimeError::Platform)?;
+        if v["ok"].as_bool() == Some(true) {
+            return Ok(v);
+        }
+        Err(exec::runtime_error_from_wire(
+            v["code"].as_str().unwrap_or(""),
+            v["cap"].as_str().unwrap_or(""),
+            v["error"].as_str().unwrap_or("agent 执行失败"),
+        ))
     }
 
     /// 带 fence 的 docker run(执行面强制校验;M1a 起 cluster 模式必用)
@@ -727,6 +865,28 @@ fn split_base(base: &str) -> Result<(String, u16), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// fence 作用域键必须覆盖各端点的标识写法(否则不同资源共用一个键,
+    /// fence 单调性会互相干扰 —— 尤其 `/agent/create` 的标识在 `spec.name`)
+    #[test]
+    fn fence_key_covers_all_endpoint_shapes() {
+        assert_eq!(fence_key(&json!({"container": "c1"})), "c1"); // 历史端点
+        assert_eq!(fence_key(&json!({"id": "c2"})), "c2"); // 新端点
+        assert_eq!(fence_key(&json!({"spec": {"name": "c3"}})), "c3"); // create/expose
+        assert_eq!(fence_key(&json!({"from": "c4", "to": "c5"})), "c4"); // rename
+        assert_eq!(fence_key(&json!({"name": "n1"})), "n1"); // network/*
+        assert_eq!(fence_key(&json!({})), "docker"); // 兜底(与改造前一致)
+        // 标识优先级:id > container > spec.name
+        assert_eq!(fence_key(&json!({"id": "a", "container": "b"})), "a");
+    }
+
+    #[test]
+    fn id_of_does_not_invent_an_id() {
+        // handler 依赖空串做参数校验,不能被兜底值污染
+        assert_eq!(id_of(&json!({"container": "c1"})), "c1");
+        assert_eq!(id_of(&json!({"spec": {"name": "c3"}})), "");
+        assert_eq!(id_of(&json!({})), "");
+    }
 
     #[test]
     fn split_base_parses_url() {

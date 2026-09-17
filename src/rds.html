@@ -4999,6 +4999,35 @@
       pointer-events: none;
     }
 
+    /* 全局提交指示器:仅在「用户发起的 POST」仍在途时出现(jget 轮询不计数),
+       延迟 180ms 才显示,避免快请求闪烁。 */
+    .busy-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      padding: 2px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--pri, #2563eb);
+      background: color-mix(in srgb, var(--pri, #2563eb) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--pri, #2563eb) 28%, transparent);
+      white-space: nowrap;
+    }
+    .busy-chip[hidden] { display: none; }
+    .busy-chip .spin { width: 10px; height: 10px; border-width: 2px; margin-right: 2px; }
+
+    /* 创建向导:提交在途时锁表单,避免误改/重复提交 */
+    #c-step-form.is-locked {
+      pointer-events: none;
+      opacity: 0.6;
+    }
+    #c-step-form.is-locked::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+    }
+
     .s-lag {
       font-family: var(--mono);
       font-size: 12px;
@@ -5775,14 +5804,6 @@
             <path d="M13 12.2l5 3.7"></path>
           </svg>节点状态
         </button>
-        <button class="nav-item" data-view="cluster" id="nav-cluster">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
-            stroke-linejoin="round" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="6" rx="2"></rect>
-            <rect x="3" y="14" width="18" height="6" rx="2"></rect>
-            <path d="M7 7h.01M7 17h.01M12 10v4"></path>
-          </svg>管控集群
-        </button>
         <button class="nav-item" data-view="tasks" id="nav-tasks">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
             stroke-linejoin="round" aria-hidden="true">
@@ -5833,6 +5854,14 @@
             <path d="M7 7.5h.01M7 16.5h.01"></path>
           </svg>主机管理
         </button>
+        <button class="nav-item" data-view="cluster" id="nav-cluster">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+            stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="6" rx="2"></rect>
+            <rect x="3" y="14" width="18" height="6" rx="2"></rect>
+            <path d="M7 7h.01M7 17h.01M12 10v4"></path>
+          </svg>管控集群
+        </button>
         <button class="nav-item" data-view="users" id="nav-users">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
             stroke-linejoin="round" aria-hidden="true">
@@ -5871,6 +5900,9 @@
             <span class="dot d-ok" id="sync-dot" title="连接状态"></span>
             <span class="sync-txt" id="sync-text">同步中…</span>
           </div>
+          <span class="busy-chip" id="busy-chip" hidden aria-live="polite" title="有提交请求正在处理">
+            <span class="spin"></span>提交中…
+          </span>
           <div class="user-chip">
             <span class="avatar" id="user-avatar">?</span>
             <span class="user-meta">
@@ -7684,12 +7716,45 @@
         if (!r.ok) { var e2 = null; try { e2 = (await r.json()).error; } catch (e3) { } throw new Error(e2 || (path + " -> HTTP " + r.status)); }
         return r.json();
       }
+      /* ═══ 全局提交指示器(仅统计用户发起的 POST) ═══
+         jget 是 2.5s 轮询用,绝不计数 —— 否则页头会一直闪。
+         快请求(<180ms)不显示,避免闪烁;并发用计数而非布尔。 */
+      var POST_BUSY_DELAY_MS = 180;
+      var postInFlight = 0;
+      var postBusyTimer = null;
+      function busyChipShow() {
+        var el = $("#busy-chip");
+        if (el) el.hidden = false;
+      }
+      function postBusyBegin() {
+        postInFlight++;
+        if (postInFlight === 1 && !postBusyTimer) {
+          postBusyTimer = setTimeout(function () {
+            postBusyTimer = null;
+            if (postInFlight > 0) busyChipShow();
+          }, POST_BUSY_DELAY_MS);
+        }
+      }
+      function postBusyEnd() {
+        if (postInFlight > 0) postInFlight--;
+        if (postInFlight === 0) {
+          if (postBusyTimer) { clearTimeout(postBusyTimer); postBusyTimer = null; }
+          var el = $("#busy-chip");
+          if (el) el.hidden = true;
+        }
+      }
+
       async function jpost(path) {
-        var r = await fetch(path, { method: "POST" });
-        if (r.status === 401) { window.location.href = "/"; throw new Error("未登录"); }
-        var d = await r.json().catch(function () { return {}; });
-        if (!r.ok || d.ok === false) throw new Error(d.error || (path + " -> HTTP " + r.status));
-        return d;
+        postBusyBegin();
+        try {
+          var r = await fetch(path, { method: "POST" });
+          if (r.status === 401) { window.location.href = "/"; throw new Error("未登录"); }
+          var d = await r.json().catch(function () { return {}; });
+          if (!r.ok || d.ok === false) throw new Error(d.error || (path + " -> HTTP " + r.status));
+          return d;
+        } finally {
+          postBusyEnd();
+        }
       }
 
       /* ═══ 轻提示 ═══ */
@@ -7790,23 +7855,40 @@
             inp.addEventListener("input", validate);
             inp.addEventListener("keydown", function (e) {
               if (e.key === "Enter" && !btnYes.disabled) { e.preventDefault(); btnYes.click(); }
-              if (e.key === "Escape") done(false, null);
+              if (e.key === "Escape" && !busy) { e.preventDefault(); done(false, null); }
             });
           });
+          var busy = false; // 异步确认在途:期间不允许关闭弹窗
           function done(ok, vals) {
+            if (busy) return;
             if (ov.parentNode) ov.parentNode.removeChild(ov);
             document.removeEventListener("keydown", onKey);
             if (prev && prev.focus) prev.focus();
             resolve(ok ? { ok: true, values: vals || values() } : { ok: false, values: null });
           }
-          function onKey(e) { if (e.key === "Escape") done(false, null); }
+          function onKey(e) { if (e.key === "Escape" && !busy) done(false, null); }
           document.addEventListener("keydown", onKey);
-          if (btnNo) btnNo.onclick = function () { done(false, null); };
+          if (btnNo) btnNo.onclick = function () { if (!busy) done(false, null); };
           btnYes.onclick = function () {
             var m = validate();
-            if (!m) done(true, null);
+            if (m) return;
+            // 无 onOk:保持历史行为(点确认即关窗,由调用方继续)
+            if (typeof o.onOk !== "function") { done(true, null); return; }
+            // 有 onOk:弹窗留在原地显示「执行中…」;失败不关窗、就地报错、可重试
+            var v = values();
+            busy = true;
+            errEl.textContent = "";
+            btnBusy(btnYes, true, o.busyLabel || "执行中…");
+            Promise.resolve()
+              .then(function () { return o.onOk(v); })
+              .then(function () { busy = false; done(true, v); })
+              .catch(function (err) {
+                busy = false;
+                btnBusy(btnYes, false);
+                errEl.textContent = (err && err.message) ? err.message : String(err);
+              });
           };
-          ov.addEventListener("mousedown", function (e) { if (e.target === ov) done(false, null); });
+          ov.addEventListener("mousedown", function (e) { if (e.target === ov && !busy) done(false, null); });
           var focusFirst = ov.querySelector("input.inp, select.inp") || btnNo || btnYes;
           if (focusFirst) setTimeout(function () { focusFirst.focus(); }, 20);
         });
@@ -7819,6 +7901,51 @@
       }
       function infoDlg(title, bodyHtml) {
         return openModal({ title: title, bodyHtml: bodyHtml, hideCancel: true, okLabel: "知道了" });
+      }
+
+      /* 「确认 → 执行 → 反馈」收敛封装。
+         相比 `riskDlg(...).then(yes => jpost(...))` 的旧写法,它把 POST 放进弹窗内:
+         点确认后弹窗原地显示「执行中…」,失败保持弹窗打开并就地报错(可直接重试),
+         成功才关窗 —— 消除了「弹窗已关、请求还在飞」的空窗期。
+         opts: { title, bodyHtml, danger, phrase, badges, okLabel, busyLabel,
+                 fields, validate, run(values), okToast } */
+      function confirmRun(opts) {
+        return openModal({
+          title: opts.title,
+          bodyHtml: opts.bodyHtml,
+          icon: opts.icon,
+          danger: !!opts.danger,
+          phrase: opts.phrase,
+          badges: opts.badges,
+          fields: opts.fields,
+          validate: opts.validate,
+          okLabel: opts.okLabel || (opts.danger ? "确认" : "确定"),
+          busyLabel: opts.busyLabel || "执行中…",
+          onOk: function (vals) {
+            return Promise.resolve(opts.run(vals)).then(function (r) {
+              if (opts.okToast) {
+                toast(typeof opts.okToast === "function" ? opts.okToast(r) : opts.okToast, "ok");
+              }
+              return r;
+            });
+          },
+        });
+      }
+      /* 执行中按钮态 + 统一收尾的便捷封装:
+         把「btnBusy(true) → await fn → 成功/失败反馈」压成一行,避免各处风格不一。 */
+      function withBtnBusy(btn, busyTxt, fn, okToastFn) {
+        btnBusy(btn, true, busyTxt);
+        return Promise.resolve()
+          .then(fn)
+          .then(function (r) {
+            if (okToastFn) toast(typeof okToastFn === "function" ? okToastFn(r) : okToastFn, "ok");
+            return r;
+          })
+          .catch(function (e) {
+            toast(e && e.message ? e.message : String(e), "err");
+            throw e;
+          })
+          .finally(function () { btnBusy(btn, false); });
       }
 
       /* ═══ 菜单 ═══ */
@@ -7940,6 +8067,9 @@
           $$("#c-arch .rcard").forEach(function (x) { x.classList.remove("on"); });
           var err = $("#c-err");
           if (err) err.textContent = "";
+          // 复位「提交在途」残留:上一次提交成功后直接跳走,按钮/表单锁不会自己恢复,
+          // 不清会出现「回到创建页看到提交中…且点不动」的假死。
+          unlockCreateForm();
           try { $("#c-step-arch").scrollIntoView({ block: "start" }); } catch (e) { /* 忽略 */ }
         }
         if (page === "hosts") renderHosts();
@@ -8006,7 +8136,7 @@
         $("#wb-run").addEventListener("click", function () { wbRun(false); });
         $("#wb-explain").addEventListener("click", function () { wbRun(true); });
         $("#wb-fmt").addEventListener("click", function () { wbFormat(); });
-        $("#wb-save").addEventListener("click", function () { wbSave(); });
+        $("#wb-save").addEventListener("click", function () { wbSave(this); });
         $("#wb-undo").addEventListener("click", function () { wbUndo(); });
         $("#wb-redo").addEventListener("click", function () { wbRedo(); });
         $("#wb-hl").addEventListener("click", function () { wbToggleHl(); });
@@ -8472,15 +8602,17 @@
         var sel = $("#wb-hist"); if (!sel) return;
         sel.innerHTML = '<option value="">选择历史 SQL…</option>' + arr.map(function (s) { return '<option value="' + esc(s.slice(0, 80)) + '">' + esc(s.slice(0, 80)) + "</option>"; }).join("");
       }
-      async function wbSave() {
+      async function wbSave(btn) {
         var sql = $("#wb-sql").value; if (!String(sql).trim()) { toast("无内容可保存", "err"); return; }
         var name = prompt("保存为(仅字母数字-_,≤64):", "query_" + new Date().toISOString().slice(0, 10)); if (!name) return;
+        if (btn) btnBusy(btn, true, "保存中…");
         try {
           var r = await jpost("/api/rds/query/save?instance=" + encodeURIComponent(WB.inst) + "&name=" + encodeURIComponent(name) + "&sql=" + encodeURIComponent(sql));
           var d = r;
           if (d && typeof d !== "object") { try { d = JSON.parse(d); } catch (e) { d = { ok: false, error: String(d) }; } }
           if (d.ok) { var t = WB.tabs[WB.active]; if (t) t.name = name; wbTabsRender(); toast("已保存: " + (d.path || name), "ok"); } else toast("保存失败: " + (d.error || ""), "err");
         } catch (e) { toast("保存请求失败", "err"); }
+        finally { if (btn) btnBusy(btn, false); }
       }
       function wbTpl() {
         var db = ($("#wb-schema-title").textContent || "order_db").split(".")[0] || "order_db";
@@ -8683,22 +8815,22 @@
         box.innerHTML = html;
       }
       function aiGroupsGov(key, n, btn) {
-        confirmDlg("群处置",
-          "将按 pattern <code>" + esc(key) + "</code> 对该告警群内 <b>" + n + "</b> 条 open/ack 告警逐条认领(ack),"
-          + "并记一次群处置审计(alert_group_ack)。<br>确认执行?", false)
-          .then(function (yes) {
-            if (!yes) return;
-            if (btn) btn.disabled = true;
-            jpost("/api/rds/alerts/gov?pattern=" + encodeURIComponent(key) + "&action=ack")
-              .then(function () {
-                if (btn) btn.disabled = false;
-                toast("已认领群内 " + n + " 条告警(ack)", "ok");
-                aiLoadGroups(true);
-              })
-              .catch(function (e) {
-                if (btn) btn.disabled = false;
-                toast("群处置失败:" + String((e && e.message) || e), "err");
-              });
+        confirmRun({
+          title: "群处置",
+          okLabel: "执行",
+          busyLabel: "处置中…",
+          bodyHtml: "将按 pattern <code>" + esc(key) + "</code> 对该告警群内 <b>" + n + "</b> 条 open/ack 告警逐条认领(ack),"
+            + "并记一次群处置审计(alert_group_ack)。<br>确认执行?",
+          run: function () {
+            return jpost("/api/rds/alerts/gov?pattern=" + encodeURIComponent(key) + "&action=ack");
+          },
+        })
+          .then(function () {
+            toast("已认领群内 " + n + " 条告警(ack)", "ok");
+            aiLoadGroups(true);
+          })
+          .catch(function (e) {
+            toast("群处置失败:" + String((e && e.message) || e), "err");
           });
       }
 
@@ -8752,20 +8884,16 @@
       }
       function aiRunReport(period, btn) {
         var label = period === "week" ? "周报" : "日报";
-        var restore = function () {
-          if (btn) { btn.disabled = false; btn.textContent = "立即生成" + label; }
-        };
-        if (btn) { btn.disabled = true; btn.textContent = "生成中…"; }
-        jpost("/api/rds/report/run?period=" + encodeURIComponent(period))
+        withBtnBusy(btn, "生成中…", function () {
+          return jpost("/api/rds/report/run?period=" + encodeURIComponent(period));
+        })
           .then(function (d) {
-            restore();
             var text = (d && d.report && d.report.text) ? d.report.text : ((d && d.text) || "");
             if (text) AIB.lastRun = { period: period, text: text, ts: Math.floor(Date.now() / 1000) };
             toast("已生成" + label + "并写入归档", "ok");
             aiLoadReports(true);
           })
           .catch(function (e) {
-            restore();
             toast("生成" + label + "失败:" + String((e && e.message) || e), "err");
           });
       }
@@ -9394,19 +9522,29 @@
         var list = Object.keys(m).filter(function (k) { return m[k]; });
         if (!list.length) { toast("请先勾选代理", "err"); return; }
         var actCn = { start: "启动", restart: "重启", stop: "停止" }[action] || action;
+        async function runBatch() {
+          var done = 0, errs = 0;
+          for (var i = 0; i < list.length; i++) {
+            try {
+              await jpost("/api/rds/proxy?container=" + encodeURIComponent(list[i]) + "&action=" + action);
+              done++;
+            } catch (e) { errs++; }
+          }
+          toast("批量" + actCn + ":成功 " + done + " 个" + (errs ? " · 失败 " + errs + " 个" : ""), errs ? "err" : "ok");
+        }
         if (action === "stop") {
-          var ok = await confirmDlg("批量停止 " + list.length + " 个代理",
-            "即将停止已选 " + list.length + " 个代理容器,停止后不再承接读写流量;<br>确认继续?", false);
-          if (!ok) return;
+          // 批量可能连发 N 个请求:放进弹窗,期间显示「停止中…」而不是空窗
+          await confirmRun({
+            title: "批量停止 " + list.length + " 个代理",
+            danger: true,
+            okLabel: "停止",
+            busyLabel: "停止中…",
+            bodyHtml: "即将停止已选 " + list.length + " 个代理容器,停止后不再承接读写流量;<br>确认继续?",
+            run: runBatch,
+          }).catch(function () { /* 错误已在弹窗内显示 */ });
+        } else {
+          await runBatch();
         }
-        var done = 0, errs = 0;
-        for (var i = 0; i < list.length; i++) {
-          try {
-            await jpost("/api/rds/proxy?container=" + encodeURIComponent(list[i]) + "&action=" + action);
-            done++;
-          } catch (e) { errs++; }
-        }
-        toast("批量" + actCn + ":成功 " + done + " 个" + (errs ? " · 失败 " + errs + " 个" : ""), errs ? "err" : "ok");
         Object.keys(m).forEach(function (k) { m[k] = false; });
         STATE.sig.px = "";
         pxBatchUI();
@@ -9455,24 +9593,34 @@
             var content = ta.value;
             var errEl = ov.querySelector("#px-conf-err");
             if (!String(content).trim()) { errEl.textContent = "配置不能为空"; return; }
-            var btn = this; btn.disabled = true; btn.textContent = "保存中…";
+            var btn = this;
+            btnBusy(btn, true, "保存并重启中…");
             jpost("/api/rds/proxy/conf?container=" + encodeURIComponent(container) + "&content=" + encodeURIComponent(content))
               .then(function (d) { toast(d.message || "已保存", "ok"); done(); STATE.sig.px = ""; tick(true); })
-              .catch(function (e) { errEl.textContent = e.message; btn.disabled = false; btn.textContent = "保存并重启"; });
+              .catch(function (e) { errEl.textContent = e.message; btnBusy(btn, false); });
           });
         }).catch(function (e) { toast("读取配置请求失败:" + e.message, "err"); });
       }
-      async function proxyAct(container, action) {
-        if (action === "stop") {
-          var ok = await confirmDlg("停止代理 " + container, "停止后该代理不再承接读写流量;<br>确认停止?", false);
-          if (!ok) return;
+      async function proxyAct(container, action, btn) {
+        var cn = { start: "启动", restart: "重启", stop: "停止", health: "健康检查" }[action] || "执行";
+        function run() {
+          return jpost("/api/rds/proxy?container=" + encodeURIComponent(container) + "&action=" + action);
         }
-        try {
-          var d = await jpost("/api/rds/proxy?container=" + encodeURIComponent(container) + "&action=" + action);
-          toast(d.message || "操作成功", "ok");
-          STATE.sig.px = "";
-          tick(true);
-        } catch (e) { toast(e.message, "err"); }
+        function after() { STATE.sig.px = ""; tick(true); }
+        if (action === "stop") {
+          await confirmRun({
+            title: "停止代理 " + container,
+            danger: true,
+            okLabel: "停止",
+            busyLabel: "停止中…",
+            bodyHtml: "停止后该代理不再承接读写流量;<br>确认停止?",
+            run: run,
+            okToast: function (d) { return d.message || "操作成功"; },
+          }).then(after).catch(function () { /* 错误已在弹窗内显示 */ });
+          return;
+        }
+        withBtnBusy(btn, cn + "中…", run, function (d) { return d.message || "操作成功"; })
+          .then(after).catch(function () { /* 已 toast */ });
       }
 
       /* ═══ 节点状态(跨实例 DB/Proxy 节点汇总 + 就地运维) ═══ */
@@ -9622,35 +9770,57 @@
           box.appendChild(tr);
         });
       }
-      async function nodeAct(container, action, inst) {
+      async function nodeAct(container, action, inst, btn) {
         if (action === "detail") { setRoute("#/i/" + encodeURIComponent(inst)); return; }
         try {
           if (action === "proxy_stop") {
-            if (!await confirmDlg("停止代理 " + container, "停止后该代理不再承接读写流量;<br>确认停止?", true)) return;
-            var d = await jpost("/api/rds/proxy?container=" + encodeURIComponent(container) + "&action=stop");
-            toast(d.message || "已停止", "ok");
+            await confirmRun({
+              title: "停止代理 " + container,
+              danger: true,
+              okLabel: "停止",
+              busyLabel: "停止中…",
+              bodyHtml: "停止后该代理不再承接读写流量;<br>确认停止?",
+              run: function () { return jpost("/api/rds/proxy?container=" + encodeURIComponent(container) + "&action=stop"); },
+              okToast: function (d) { return d.message || "已停止"; },
+            }).catch(function () { /* 错误已在弹窗内显示 */ });
           } else if (action === "proxy_start" || action === "proxy_restart" || action === "proxy_health") {
-            var d2 = await jpost("/api/rds/proxy?container=" + encodeURIComponent(container) +
-              "&action=" + action.replace("proxy_", ""));
-            toast(d2.message || "操作成功", "ok");
+            var cn2 = { proxy_start: "启动", proxy_restart: "重启", proxy_health: "健康检查" }[action] || "执行";
+            var d2 = await withBtnBusy(btn, cn2 + "中…", function () {
+              return jpost("/api/rds/proxy?container=" + encodeURIComponent(container) +
+                "&action=" + action.replace("proxy_", ""));
+            }, function (r2) { return r2.message || "操作成功"; });
           } else if (action === "xenon_trytoleader") {
-            var ok = await riskDlg("切换 raft leader 到 " + container,
-              "将向 <b>" + esc(container) + "</b> 发起 raft 竞选(xenoncli raft trytoleader)。<br>" +
-              "需多数派成员达成一致后切换完成,期间存在<b>秒级不可写窗口</b>;竞选失败则保持原角色。全程审计。",
-              "发起竞选", [inst]);
-            if (!ok) return;
-            var d3 = await jpost("/api/rds/xenon/raft/trytoleader?instance=" + encodeURIComponent(inst) +
-              "&node=" + encodeURIComponent(container));
-            toast("已发起竞选:" + (d3.message || "ok"), "ok");
+            await confirmRun({
+              title: "切换 raft leader 到 " + container,
+              danger: true,
+              okLabel: "发起竞选",
+              busyLabel: "竞选中…",
+              phrase: "发起竞选",
+              badges: [inst],
+              bodyHtml: "将向 <b>" + esc(container) + "</b> 发起 raft 竞选(xenoncli raft trytoleader)。<br>" +
+                "需多数派成员达成一致后切换完成,期间存在<b>秒级不可写窗口</b>;竞选失败则保持原角色。全程审计。",
+              run: function () {
+                return jpost("/api/rds/xenon/raft/trytoleader?instance=" + encodeURIComponent(inst) +
+                  "&node=" + encodeURIComponent(container));
+              },
+              okToast: function (d3) { return "已发起竞选:" + (d3.message || "ok"); },
+            }).catch(function () { /* 错误已在弹窗内显示 */ });
           } else if (action === "reparent_to_this") {
-            var ok2 = await riskDlg("受管切主到 " + container,
-              "将对 <b>" + esc(inst) + "</b> 执行计划切换(PRS):提升 <b>" + esc(container) +
-              "</b> 为主,旧主置只读并重挂为新主从。<br>要求旧主在线;失败自动回滚只读并降级告警。全程审计。",
-              "确认切换", [inst]);
-            if (!ok2) return;
-            var d4 = await jpost("/api/rds/orch/reparent?instance=" + encodeURIComponent(inst) +
-              "&target=" + encodeURIComponent(container) + "&mode=planned");
-            toast("受管切换已提交:" + (d4.op_id || ""), "ok");
+            await confirmRun({
+              title: "受管切主到 " + container,
+              danger: true,
+              okLabel: "确认切换",
+              busyLabel: "切换中…",
+              phrase: "确认切换",
+              badges: [inst],
+              bodyHtml: "将对 <b>" + esc(inst) + "</b> 执行计划切换(PRS):提升 <b>" + esc(container) +
+                "</b> 为主,旧主置只读并重挂为新主从。<br>要求旧主在线;失败自动回滚只读并降级告警。全程审计。",
+              run: function () {
+                return jpost("/api/rds/orch/reparent?instance=" + encodeURIComponent(inst) +
+                  "&target=" + encodeURIComponent(container) + "&mode=planned");
+              },
+              okToast: function (d4) { return "受管切换已提交:" + (d4.op_id || ""); },
+            }).catch(function () { /* 错误已在弹窗内显示 */ });
           } else return;
         } catch (e) { toast(e.message, "err"); return; }
         STATE.sig.px = "";
@@ -9673,7 +9843,7 @@
           rows.addEventListener("click", function (e) {
             var b = e.target.closest("[data-nd]");
             if (!b) return;
-            nodeAct(b.dataset.ndc, b.dataset.nd, b.dataset.ndi);
+            nodeAct(b.dataset.ndc, b.dataset.nd, b.dataset.ndi, b);
           });
         }
       })();
@@ -9913,17 +10083,20 @@
       async function clusterStepdown() {
         var q = (CL.data || {}).quorum || {};
         if (!q.leader) { toast("当前无 leader,无需让位", "err"); return; }
-        var ok = await riskDlg("主动让位:leader " + q.leader,
-          "让 <b>" + esc(q.leader) + "</b> 主动放弃 leader 身份,由 raft 重新选主。<br>" +
-          "继任者由 raft 按「<b>日志已追平优先</b>」自动选择(不允许人工指定,避免把未追平的副本推成主);" +
-          "已授予的实例租约在 TTL 内仍然有效,<b>已提交数据不丢</b>,但存在<b>秒级不可写窗口</b>。<br>" +
-          "可从任意副本发起(会自动转发给当前 leader),全程审计。",
-          "确认让位", ["stepdown"]);
-        if (!ok) return;
-        try {
-          var r = await jpost("/api/rds/cluster/stepdown");
-          toast(r.message || "已触发让位", "ok");
-        } catch (e) { toast(e.message, "err"); return; }
+        await confirmRun({
+          title: "主动让位:leader " + q.leader,
+          danger: true,
+          okLabel: "确认让位",
+          busyLabel: "让位中…",
+          phrase: "确认让位",
+          badges: ["stepdown"],
+          bodyHtml: "让 <b>" + esc(q.leader) + "</b> 主动放弃 leader 身份,由 raft 重新选主。<br>" +
+            "继任者由 raft 按「<b>日志已追平优先</b>」自动选择(不允许人工指定,避免把未追平的副本推成主);" +
+            "已授予的实例租约在 TTL 内仍然有效,<b>已提交数据不丢</b>,但存在<b>秒级不可写窗口</b>。<br>" +
+            "可从任意副本发起(会自动转发给当前 leader),全程审计。",
+          run: function () { return jpost("/api/rds/cluster/stepdown"); },
+          okToast: function (r) { return r.message || "已触发让位"; },
+        }).catch(function () { /* 错误已在弹窗内显示 */ });
         setTimeout(function () { clusterFetch(true); }, 1500);
         setTimeout(function () { clusterFetch(true); }, 4000);
       }
@@ -9931,17 +10104,20 @@
         var d = CL.data || {};
         var q = d.quorum || {};
         var me = (d.members || []).filter(function (m) { return m.is_self; })[0] || {};
-        var ok = await riskDlg("重建审计投影",
-          "把 sink(元数据库)的审计投影游标置 0,leader 下一轮对账(≤5s)从共识日志<b>幂等重放</b>补齐;" +
-          "幂等标记保证重复行不会产生。<br>本动作<b>不写库、不影响共识与租约</b>,只影响审计投影的补齐进度。<br>" +
-          "仅在 <b>leader</b> 上有效:本副本角色 <b>" + esc(me.role || "?") + "</b>" +
-          (q.leader ? ",当前 leader=<b>" + esc(q.leader) + "</b>" : "") + "。",
-          "确认重建", ["resync"]);
-        if (!ok) return;
-        try {
-          var r = await jpost("/api/rds/cluster/resync-sink");
-          toast(r.message || "已重置投影游标", "ok");
-        } catch (e) { toast(e.message, "err"); return; }
+        await confirmRun({
+          title: "重建审计投影",
+          danger: true,
+          okLabel: "确认重建",
+          busyLabel: "重建中…",
+          phrase: "确认重建",
+          badges: ["resync"],
+          bodyHtml: "把 sink(元数据库)的审计投影游标置 0,leader 下一轮对账(≤5s)从共识日志<b>幂等重放</b>补齐;" +
+            "幂等标记保证重复行不会产生。<br>本动作<b>不写库、不影响共识与租约</b>,只影响审计投影的补齐进度。<br>" +
+            "仅在 <b>leader</b> 上有效:本副本角色 <b>" + esc(me.role || "?") + "</b>" +
+            (q.leader ? ",当前 leader=<b>" + esc(q.leader) + "</b>" : "") + "。",
+          run: function () { return jpost("/api/rds/cluster/resync-sink"); },
+          okToast: function (r) { return r.message || "已重置投影游标"; },
+        }).catch(function () { /* 错误已在弹窗内显示 */ });
         setTimeout(function () { clusterFetch(true); }, 1200);
       }
       (function initClusterView() {
@@ -10454,10 +10630,13 @@
           .then(function (d) { dtAlerts = d.alerts || []; STATE.sig.dtAlerts = ""; renderDetailAlerts(); })
           .catch(function () { });
       }
-      function actAlertDetail(id, action) {
-        jpost("/api/rds/alert?id=" + id + "&action=" + action)
-          .then(function () { toast(action === "ack" ? "已认领,请处置" : "已解决", "ok"); STATE.sig.dtAlerts = ""; refreshDetailAlerts(); updateAlertBadge(); })
-          .catch(function (e) { toast(e.message, "err"); });
+      function actAlertDetail(id, action, btn) {
+        var cn = action === "ack" ? "认领" : "解决";
+        withBtnBusy(btn, cn + "中…", function () {
+          return jpost("/api/rds/alert?id=" + id + "&action=" + action);
+        }, action === "ack" ? "已认领,请处置" : "已解决")
+          .then(function () { STATE.sig.dtAlerts = ""; refreshDetailAlerts(); updateAlertBadge(); })
+          .catch(function () { /* 已 toast */ });
       }
       function updateAlertBadge() {
         if (!accessInst) return;
@@ -11278,28 +11457,39 @@
             if (!v.name || !v.name.trim()) return "请填写机器名";
             if (!(v.cpu > 0) || !(v.mem_gb > 0)) return "cpu / mem_gb 需为正数";
             return null;
-          }
-        }).then(function (r) {
-          if (!r.ok) return;
-          var v = r.values;
-          var q = "name=" + encodeURIComponent((v.name || "").trim()) + "&ip=" + encodeURIComponent((v.ip || "").trim())
-            + "&region=" + encodeURIComponent((v.region || "").trim()) + "&az=" + encodeURIComponent((v.az || "").trim())
-            + "&rack=" + encodeURIComponent((v.rack || "").trim()) + "&cpu=" + (parseInt(v.cpu, 10) || 0)
-            + "&mem_gb=" + (parseInt(v.mem_gb, 10) || 0) + "&disk_gb=" + (parseInt(v.disk_gb, 10) || 0)
-            + "&agent_port=" + (parseInt(v.agent_port, 10) || 0);
-          jpost("/api/rds/hosts?" + q).then(function () { toast("机器已登记/更新", "ok"); renderHosts(); }).catch(function (e) { toast(e.message, "err"); });
+          },
+          busyLabel: "保存中…",
+          onOk: hostCreateSubmit,
         });
       }
-      function hostSetStatus(name, status) {
-        jpost("/api/rds/hosts/status?name=" + encodeURIComponent(name) + "&status=" + encodeURIComponent(status))
-          .then(function () { toast("机器状态 → " + status, "ok"); renderHosts(); })
-          .catch(function (e) { toast(e.message, "err"); });
+      function hostCreateSubmit(v) {
+        var q = "name=" + encodeURIComponent((v.name || "").trim()) + "&ip=" + encodeURIComponent((v.ip || "").trim())
+          + "&region=" + encodeURIComponent((v.region || "").trim()) + "&az=" + encodeURIComponent((v.az || "").trim())
+          + "&rack=" + encodeURIComponent((v.rack || "").trim()) + "&cpu=" + (parseInt(v.cpu, 10) || 0)
+          + "&mem_gb=" + (parseInt(v.mem_gb, 10) || 0) + "&disk_gb=" + (parseInt(v.disk_gb, 10) || 0)
+          + "&agent_port=" + (parseInt(v.agent_port, 10) || 0);
+        return jpost("/api/rds/hosts?" + q).then(function () {
+          toast("机器已登记/更新", "ok"); renderHosts();
+        });
+      }
+      function hostSetStatus(name, status, btn) {
+        var cn = { running: "恢复", maintenance: "置维护", retiring: "置退役" }[status] || "变更";
+        withBtnBusy(btn, cn + "中…", function () {
+          return jpost("/api/rds/hosts/status?name=" + encodeURIComponent(name) + "&status=" + encodeURIComponent(status));
+        }, function () { return "机器状态 → " + status; })
+          .then(function () { renderHosts(); }).catch(function () { /* 已 toast */ });
       }
       function hostDelete(name) {
-        riskDlg("删除机器 " + name, "删除后不可恢复。若仍有实例节点绑定该机器将被拒绝。<br>请输入机器名确认。", name).then(function (yes) {
-          if (!yes) return;
-          jpost("/api/rds/hosts/delete?name=" + encodeURIComponent(name)).then(function () { toast("已删除机器", "ok"); renderHosts(); }).catch(function (e) { toast(e.message, "err"); });
-        });
+        confirmRun({
+          title: "删除机器 " + name,
+          danger: true,
+          phrase: name,
+          okLabel: "执行",
+          busyLabel: "删除中…",
+          bodyHtml: "删除后不可恢复。若仍有实例节点绑定该机器将被拒绝。<br>请输入机器名确认。",
+          run: function () { return jpost("/api/rds/hosts/delete?name=" + encodeURIComponent(name)); },
+          okToast: "已删除机器",
+        }).then(function () { renderHosts(); }).catch(function () { /* 错误已在弹窗内显示 */ });
       }
       function renderHosts() {
         bindHostCreate();
@@ -11335,7 +11525,7 @@
             tb.appendChild(tr);
             if (manage) {
               tr.querySelectorAll("[data-hs]").forEach(function (b) {
-                b.addEventListener("click", function () { hostSetStatus(h.name, b.dataset.hs); });
+                b.addEventListener("click", function () { hostSetStatus(h.name, b.dataset.hs, b); });
               });
               var del = tr.querySelector("[data-hd]");
               if (del) del.addEventListener("click", function () { hostDelete(h.name); });
@@ -11368,11 +11558,12 @@
           }).then(function (r) {
             if (!r.ok) return;
             var row = rows.filter(function (h) { return h.name === r.values.host; })[0] || {};
-            openModal({
+            confirmRun({
               title: "确认整机迁移",
               icon: "warn",
               danger: true,
               okLabel: "提交迁移",
+              busyLabel: "提交迁移…",
               phrase: "确认迁移",
               bodyHtml: "目标: <b>" + esc(row.name) + "</b> · " + esc(row.region || "") + "/" + esc(row.az || "") + "<br>region/az 默认取目标机登记值,可覆盖(多机迁移请把 hosts 填为逗号分隔清单)。",
               fields: [
@@ -11380,17 +11571,13 @@
                 { key: "region", type: "text", label: "目标 region", value: row.region || "" },
                 { key: "az", type: "text", label: "目标 az", value: row.az || "" }
               ],
-              validate: function (v) { return (v.region && v.region.trim() && v.az && v.az.trim() && v.hosts && v.hosts.trim()) ? null : "请填写 hosts / region / az"; }
-            }).then(function (r2) {
-              if (!r2.ok) return;
-              var v = r2.values;
-              jpost("/api/rds/migrate?instance=" + encodeURIComponent(i.name) + "&region=" + encodeURIComponent(v.region.trim())
-                + "&az=" + encodeURIComponent(v.az.trim()) + "&hosts=" + encodeURIComponent(v.hosts.trim().replace(/[\s\u3000]+/g, "")))
-                .then(function (d) {
-                  toast("迁移任务已提交(" + (d.task_id || "") + "),可到「任务」页签看进度", "ok");
-                  tick(true);
-                }).catch(function (e) { toast(e.message, "err"); });
-            });
+              validate: function (v) { return (v.region && v.region.trim() && v.az && v.az.trim() && v.hosts && v.hosts.trim()) ? null : "请填写 hosts / region / az"; },
+              run: function (v) {
+                return jpost("/api/rds/migrate?instance=" + encodeURIComponent(i.name) + "&region=" + encodeURIComponent(v.region.trim())
+                  + "&az=" + encodeURIComponent(v.az.trim()) + "&hosts=" + encodeURIComponent(v.hosts.trim().replace(/[\s\u3000]+/g, "")));
+              },
+              okToast: function (d) { return "迁移任务已提交(" + (d.task_id || "") + "),可到「任务」页签看进度"; },
+            }).then(function () { tick(true); }).catch(function () { /* 错误已在弹窗内显示 */ });
           });
         });
       }
@@ -11415,21 +11602,19 @@
           }).then(function (r) {
             if (!r.ok) return;
             var v = r.values;
-            openModal({
+            confirmRun({
               title: "确认替换节点",
               icon: "warn",
               danger: true,
               okLabel: "提交替换",
+              busyLabel: "提交替换…",
               phrase: "确认替换",
-              bodyHtml: "将 <b>" + esc(v.node) + "</b> 替换到 <b>" + esc(v.host) + "</b>。"
-            }).then(function (r2) {
-              if (!r2.ok) return;
-              jpost("/api/rds/replace_node?instance=" + encodeURIComponent(i.name) + "&node=" + encodeURIComponent(v.node) + "&host=" + encodeURIComponent(v.host))
-                .then(function (d) {
-                  toast("替换任务已提交(" + (d.task_id || "") + "),可到「任务」页签看进度", "ok");
-                  tick(true);
-                }).catch(function (e) { toast(e.message, "err"); });
-            });
+              bodyHtml: "将 <b>" + esc(v.node) + "</b> 替换到 <b>" + esc(v.host) + "</b>。",
+              run: function () {
+                return jpost("/api/rds/replace_node?instance=" + encodeURIComponent(i.name) + "&node=" + encodeURIComponent(v.node) + "&host=" + encodeURIComponent(v.host));
+              },
+              okToast: function (d) { return "替换任务已提交(" + (d.task_id || "") + "),可到「任务」页签看进度"; },
+            }).then(function () { tick(true); }).catch(function () { /* 错误已在弹窗内显示 */ });
           });
         });
       }
@@ -11437,15 +11622,18 @@
       /* ═══ 操作:启停 / 扩容 / 销毁 / 创建 / 取消任务 ═══ */
       function doSetEnabled(name, enabled) {
         var label = enabled ? "启用" : "停用";
-        confirmDlg(label + "实例 " + name,
-          enabled
+        confirmRun({
+          title: label + "实例 " + name,
+          okLabel: label,
+          busyLabel: label + "中…",
+          bodyHtml: enabled
             ? "将恢复该实例的常规管理(扩容/变更可用)。<br>实例仍运行,不受影响。"
-            : "停用后实例<b>仍运行</b>,但会<b>拒绝扩容等变更</b>(仍允许启用与销毁清理)。<br>确认" + label + "?").then(function (yes) {
-              if (!yes) return;
-              jpost("/api/rds/enable?name=" + encodeURIComponent(name) + "&value=" + (enabled ? "1" : "0"))
-                .then(function () { toast("已" + (enabled ? "启用" : "停用"), "ok"); tick(true); })
-                .catch(function (e) { toast(e.message, "err"); });
-            });
+            : "停用后实例<b>仍运行</b>,但会<b>拒绝扩容等变更</b>(仍允许启用与销毁清理)。<br>确认" + label + "?",
+          run: function () {
+            return jpost("/api/rds/enable?name=" + encodeURIComponent(name) + "&value=" + (enabled ? "1" : "0"));
+          },
+          okToast: "已" + label,
+        }).then(function () { tick(true); }).catch(function () { /* 错误已在弹窗内显示 */ });
       }
       function startScaleout(name, role) {
         var label = role === "read" ? "扩容在线读从" : "扩容离线从";
@@ -11475,117 +11663,54 @@
       /* 分片级扩容:多分片实例按目标分片新增读从/离线从(挂到该分片 master) */
       async function shardScale(name, shard, role) {
         var rl = role === "offline" ? "离线从" : "读从";
-        if (role === "offline") {
-          var ok = await confirmDlg("扩容离线从 · 分片 " + shard,
-            "为分片 " + esc(shard) + " 新增离线从(备份/统计)?<br>每分片仅允许一个离线从;复制源为该分片主节点。", false);
-          if (!ok) return;
-        }
-        try {
-          var d = await jpost("/api/rds/scaleout?name=" + encodeURIComponent(name) +
-            "&shard=" + encodeURIComponent(shard) + "&role=" + role);
-          toast("分片 " + shard + " 扩容" + rl + "任务已提交:" + d.task_id, "ok");
+        var url = "/api/rds/scaleout?name=" + encodeURIComponent(name) +
+          "&shard=" + encodeURIComponent(shard) + "&role=" + role;
+        function afterSubmit() {
           tick(true);
           if (STATE.current === name) refreshDetail(false);
-        } catch (e) { toast(e.message, "err"); }
+        }
+        if (role === "offline") {
+          // 有确认弹窗:把提交放进弹窗,期间显示「扩容中…」
+          confirmRun({
+            title: "扩容离线从 · 分片 " + shard,
+            okLabel: "扩容",
+            busyLabel: "扩容中…",
+            bodyHtml: "为分片 " + esc(shard) + " 新增离线从(备份/统计)?<br>每分片仅允许一个离线从;复制源为该分片主节点。",
+            run: function () { return jpost(url); },
+            okToast: function (d) { return "分片 " + shard + " 扩容" + rl + "任务已提交:" + d.task_id; },
+          }).then(afterSubmit).catch(function () { /* 错误已在弹窗内显示 */ });
+          return;
+        }
+        withBtnBusy(null, null, function () { return jpost(url); },
+          function (d) { return "分片 " + shard + " 扩容" + rl + "任务已提交:" + d.task_id; })
+          .then(afterSubmit).catch(function () { /* 已 toast */ });
       }
       function doDestroy(name) {
-        riskDlg("销毁实例(高危)",
-          '即将销毁 <b class="mono">' + esc(name) + '</b> 的全部容器与网络,<b>不可恢复</b>。<br>请按提示输入实例名确认。',
-          name).then(function (yes) {
-            if (!yes) return;
-            jpost("/api/rds/destroy?name=" + encodeURIComponent(name))
-              .then(function (d) { toast("销毁任务已提交:" + d.task_id, "ok"); tick(true); })
-              .catch(function (e) { toast(e.message, "err"); });
-          });
+        confirmRun({
+          title: "销毁实例(高危)",
+          danger: true,
+          phrase: name,
+          okLabel: "执行",
+          busyLabel: "销毁中…",
+          bodyHtml: '即将销毁 <b class="mono">' + esc(name) + '</b> 的全部容器与网络,<b>不可恢复</b>。<br>请按提示输入实例名确认。',
+          run: function () { return jpost("/api/rds/destroy?name=" + encodeURIComponent(name)); },
+          okToast: function (d) { return "销毁任务已提交:" + d.task_id; },
+        }).then(function () { tick(true); }).catch(function () { /* 错误已在弹窗内显示 */ });
       }
       function doDeleteRecord(name) {
-        riskDlg("彻底删除实例记录(高危)",
-          '将永久移除实例 <b class="mono">' + esc(name) + '</b> 在控制台的记录(容器与网络此前已随销毁清理,不可恢复)。<br>历史任务与审计日志仍保留留痕。<br>请按提示输入实例名确认。',
-          name).then(function (yes) {
-            if (!yes) return;
-            jpost("/api/rds/instance/delete?name=" + encodeURIComponent(name))
-              .then(function () {
-                toast("实例记录已删除", "ok");
-                if (STATE.current === name) { STATE.current = null; setRoute("#/instances"); }
-                tick(true);
-              })
-              .catch(function (e) { toast(e.message, "err"); });
-          });
-      }
-      function doCreate() {
-        openModal({
-          title: "创建实例",
-          okLabel: "提交创建",
-          bodyHtml: "db 架构类型与 proxy 集群数量创建时选定;<b>运营信息与基础配置</b>创建时填写,创建后仍可在详情页修改。",
-          fields: [
-            { key: "name", type: "text", label: "实例名(字母/数字/-/_)", placeholder: "如 order-prod-01" },
-            {
-              key: "itype", type: "select", label: "DB 架构类型", options: [
-                { v: "async", l: "主从异步(默认)" }, { v: "sync", l: "主从同步" },
-                { v: "single", l: "单实例" },
-                { v: "xenon", l: "Xenon Raft 高可用(需 xenon-local 镜像)" },
-                { v: "distributed", l: "分布式 OceanBase(占位 · 近期开放)" }
-              ]
-            },
-            {
-              key: "proxies", type: "select", label: "Proxy 集群实例数", options: [
-                { v: "2", l: "2(推荐,组成高可用集群)" }, { v: "1", l: "1" }, { v: "4", l: "4" }
-              ]
-            },
-            { key: "region", type: "text", label: "region(空=默认)", placeholder: "cn-north" },
-            { key: "az", type: "text", label: "az(空=默认)", placeholder: "az1" },
-            { key: "core", type: "check", label: "归属", options: [{ v: "1", l: "核心实例" }], checked: [] },
-            { key: "biz", type: "text", label: "业务线", placeholder: "如 支付" },
-            { key: "dba", type: "text", label: "DBA 负责人", placeholder: "如 zhang.san" },
-            { key: "contact", type: "text", label: "业务接口人", placeholder: "如 li.si" },
-            { key: "spec", type: "text", label: "规格", placeholder: "如 8C16G" },
-            { key: "shard_num", type: "text", label: "分片数", placeholder: "1" },
-            { key: "mysql_version", type: "text", label: "MySQL 版本", placeholder: "如 8.0" },
-            { key: "proxy_version", type: "text", label: "Proxy 版本", placeholder: "如 2shard-2024.1" },
-            { key: "data_size", type: "text", label: "当前数据量", placeholder: "如 128GiB" },
-            { key: "buffer_pool", type: "text", label: "Buffer Pool", placeholder: "如 8GiB" },
-            { key: "max_qps", type: "text", label: "最大 QPS", placeholder: "0" },
-            { key: "max_tps", type: "text", label: "TPS 峰值", placeholder: "0" }
-          ],
-          validate: function (v) {
-            var n = (v.name || "").trim();
-            if (!/^[A-Za-z0-9_-]{1,60}$/.test(n)) return "实例名必填(字母/数字/-/_)";
-            if ((v.itype || "async") === "distributed") return "分布式需引擎模板,暂不可创建";
-            if (!(v.shard_num || "").trim() || !/^\d+$/.test((v.shard_num || "").trim())) return "分片数需为数字";
-            if ((v.max_qps || "").trim() && !/^\d+$/.test((v.max_qps || "").trim())) return "QPS 需为数字";
-            if ((v.max_tps || "").trim() && !/^\d+$/.test((v.max_tps || "").trim())) return "TPS 需为数字";
-            return null;
-          }
-        }).then(function (r) {
-          if (!r.ok) return;
-          var v = r.values;
-          var p = new URLSearchParams();
-          p.set("name", (v.name || "").trim());
-          p.set("itype", v.itype || "async");
-          p.set("proxies", v.proxies || "2");
-          if (v.region) p.set("region", v.region.trim());
-          if (v.az) p.set("az", v.az.trim());
-          if (v.biz) p.set("biz", v.biz.trim());
-          if (v.contact) p.set("contact", v.contact.trim());
-          if (v.dba) p.set("dba", v.dba.trim());
-          if ((v.core || []).length) p.set("core", "1");
-          if (v.spec) p.set("spec", v.spec.trim());
-          p.set("shard_num", (v.shard_num || "1").trim());
-          if (v.mysql_version) p.set("mysql_version", v.mysql_version.trim());
-          if (v.proxy_version) p.set("proxy_version", v.proxy_version.trim());
-          if (v.data_size) p.set("data_size", v.data_size.trim());
-          if (v.buffer_pool) p.set("buffer_pool", v.buffer_pool.trim());
-          if (v.max_qps) p.set("max_qps", (v.max_qps || "0").trim());
-          if (v.max_tps) p.set("max_tps", (v.max_tps || "0").trim());
-          var btn = $("#btn-create");
-          btn.disabled = true;
-          jpost("/api/rds/create?" + p.toString())
-            .then(function (d) {
-              toast("创建任务已提交:" + d.task_id, "ok");
-              tick(true);
-            }).catch(function (e) { toast(e.message, "err"); })
-            .finally(function () { btn.disabled = false; });
-        });
+        confirmRun({
+          title: "彻底删除实例记录(高危)",
+          danger: true,
+          phrase: name,
+          okLabel: "执行",
+          busyLabel: "删除中…",
+          bodyHtml: '将永久移除实例 <b class="mono">' + esc(name) + '</b> 在控制台的记录(容器与网络此前已随销毁清理,不可恢复)。<br>历史任务与审计日志仍保留留痕。<br>请按提示输入实例名确认。',
+          run: function () { return jpost("/api/rds/instance/delete?name=" + encodeURIComponent(name)); },
+          okToast: "实例记录已删除",
+        }).then(function () {
+          if (STATE.current === name) { STATE.current = null; setRoute("#/instances"); }
+          tick(true);
+        }).catch(function () { /* 错误已在弹窗内显示 */ });
       }
       function doCancelTask(id) {
         var btn = document.querySelector('[data-cancel="' + id + '"]');
@@ -11832,7 +11957,7 @@
             if (!tb) return;
             e.stopPropagation();
             var p = tb.dataset.tact.split(":");
-            taskAct(p[0], p[1]);
+            taskAct(p[0], p[1], tb);
           });
           var cancelBtn = head.querySelector("[data-cancel]");
           if (cancelBtn) {
@@ -12183,24 +12308,26 @@
         var name = $("#nu-name").value.trim();
         var pass = $("#nu-pass").value;
         if (!name || pass.length < 4) { toast("用户名必填且密码至少 4 位", "err"); return; }
-        jpost("/api/rds/users?action=create&user=" + encodeURIComponent(name) + "&pass=" + encodeURIComponent(pass))
+        withBtnBusy($("#btn-user-create"), "创建中…", function () {
+          return jpost("/api/rds/users?action=create&user=" + encodeURIComponent(name) + "&pass=" + encodeURIComponent(pass));
+        }, "已创建用户 " + name)
           .then(function () {
-            toast("已创建用户 " + name, "ok");
             $("#nu-name").value = ""; $("#nu-pass").value = "";
             STATE.sig.users = "";
             renderUsers(true);
-          }).catch(function (e) { toast(e.message, "err"); });
+          }).catch(function () { /* 已 toast */ });
       }
       function createRole() {
         var name = $("#nr-name").value.trim();
         if (!name) { toast("角色名必填", "err"); return; }
-        jpost("/api/rds/roles?action=create&role=" + encodeURIComponent(name))
+        withBtnBusy($("#btn-role-create"), "创建中…", function () {
+          return jpost("/api/rds/roles?action=create&role=" + encodeURIComponent(name));
+        }, "已创建角色 " + name)
           .then(function () {
-            toast("已创建角色 " + name, "ok");
             $("#nr-name").value = "";
             STATE.sig.roles = "";
             renderRoles(true);
-          }).catch(function (e) { toast(e.message, "err"); });
+          }).catch(function () { /* 已 toast */ });
       }
       function assignRoles(user) {
         var cur = [];
@@ -12209,16 +12336,17 @@
           title: "分配角色:" + user,
           bodyHtml: "勾选该用户所属角色,权限随角色生效(super 自动全权限)。",
           okLabel: "保存",
+          busyLabel: "保存中…",
           fields: [{
             key: "roles", type: "check", label: "角色",
             options: ALL_ROLES.map(function (x) { return { v: x.name, l: x.name + (x.name === "super" ? " · 全权限" : (ROLE_CN[x.name] ? " · " + ROLE_CN[x.name] : "")) }; }),
             checked: cur
-          }]
-        }).then(function (r) {
-          if (!r.ok) return;
-          jpost("/api/rds/users?action=roles&user=" + encodeURIComponent(user) + "&roles=" + encodeURIComponent(r.values.roles.join(",")))
-            .then(function () { toast("角色已更新", "ok"); STATE.sig.users = ""; renderUsers(true); })
-            .catch(function (e) { toast(e.message, "err"); });
+          }],
+          // POST 放进弹窗:失败时弹窗不关并就地报错,不再出现「关窗后无反馈」
+          onOk: function (v) {
+            return jpost("/api/rds/users?action=roles&user=" + encodeURIComponent(user) + "&roles=" + encodeURIComponent(v.roles.join(",")))
+              .then(function () { toast("角色已更新", "ok"); STATE.sig.users = ""; renderUsers(true); });
+          }
         });
       }
       function resetPass(user) {
@@ -12226,32 +12354,38 @@
           title: "重置密码:" + user,
           bodyHtml: "为该用户设置新密码(至少 4 位)。",
           okLabel: "保存",
+          busyLabel: "保存中…",
           fields: [{ key: "pass", type: "password", label: "新密码", placeholder: "≥ 4 位" }],
-          validate: function (v) { return (v.pass || "").length >= 4 ? null : "密码至少 4 位"; }
-        }).then(function (r) {
-          if (!r.ok) return;
-          jpost("/api/rds/users?action=setpass&user=" + encodeURIComponent(user) + "&pass=" + encodeURIComponent(r.values.pass))
-            .then(function () { toast("密码已更新", "ok"); })
-            .catch(function (e) { toast(e.message, "err"); });
+          validate: function (v) { return (v.pass || "").length >= 4 ? null : "密码至少 4 位"; },
+          onOk: function (v) {
+            return jpost("/api/rds/users?action=setpass&user=" + encodeURIComponent(user) + "&pass=" + encodeURIComponent(v.pass))
+              .then(function () { toast("密码已更新", "ok"); });
+          }
         });
       }
       function freezeUser(user, freeze) {
-        confirmDlg(freeze ? "冻结用户 " + user : "解冻用户 " + user,
-          freeze
+        confirmRun({
+          title: freeze ? "冻结用户 " + user : "解冻用户 " + user,
+          danger: !!freeze,
+          okLabel: freeze ? "冻结" : "解冻",
+          busyLabel: freeze ? "冻结中…" : "解冻中…",
+          bodyHtml: freeze
             ? "冻结后该用户<b>所有会话立即失效</b>(登录与请求被拒)。<br>确认冻结?"
-            : "解冻后该用户可重新登录。确认解冻?", freeze).then(function (yes) {
-              if (!yes) return;
-              jpost("/api/rds/users?action=enabled&user=" + encodeURIComponent(user) + "&value=" + (freeze ? "0" : "1"))
-                .then(function () { toast("已" + (freeze ? "冻结" : "解冻"), "ok"); STATE.sig.users = ""; renderUsers(true); })
-                .catch(function (e) { toast(e.message, "err"); });
-            });
+            : "解冻后该用户可重新登录。确认解冻?",
+          run: function () {
+            return jpost("/api/rds/users?action=enabled&user=" + encodeURIComponent(user) + "&value=" + (freeze ? "0" : "1"));
+          },
+          okToast: "已" + (freeze ? "冻结" : "解冻"),
+        }).then(function () { STATE.sig.users = ""; renderUsers(true); }).catch(function () { /* 错误已在弹窗内显示 */ });
       }
       function saveRolePerms(role, cardEl) {
         var sel = [];
         cardEl.querySelectorAll("input[data-perm]:checked").forEach(function (c) { sel.push(c.dataset.perm); });
-        jpost("/api/rds/roles?action=perms&role=" + encodeURIComponent(role) + "&perms=" + encodeURIComponent(sel.join(",")))
-          .then(function () { toast("权限已保存", "ok"); STATE.sig.roles = ""; renderRoles(true); })
-          .catch(function (e) { toast(e.message, "err"); });
+        withBtnBusy($(cardEl).querySelector("[data-rsave]"), "保存中…", function () {
+          return jpost("/api/rds/roles?action=perms&role=" + encodeURIComponent(role) + "&perms=" + encodeURIComponent(sel.join(",")));
+        }, "权限已保存")
+          .then(function () { STATE.sig.roles = ""; renderRoles(true); })
+          .catch(function () { /* 已 toast */ });
       }
       $("#user-rows").addEventListener("click", function (e) {
         var b = e.target.closest("button[data-urole],[data-upass],[data-ufreeze]");
@@ -12313,33 +12447,28 @@
         if (!hasPerm(need)) { toast("权限不足:缺少 " + need, "err"); return; }
         // 彻底删除记录:逐个调用 instance/delete(instances.destroy 授权;后端仅允许已销毁)
         if (action === "delrec") {
-          riskDlg("批量彻底删除实例记录(高危)",
-            "将移除 <b>" + names.length + "</b> 个<b>已销毁</b>实例的控制台记录(容器已随销毁清理),<b>不可恢复</b>。<br>历史任务与审计日志留痕保留。",
-            "确认删除" + names.length + "条记录", names).then(function (yes) {
-            if (!yes) return;
-            var okN = 0, fails = [];
-            var q = names.map(function (nm) { return encodeURIComponent(nm); });
-            Promise.all(q.map(function (enc, idx) {
-              return jpost("/api/rds/instance/delete?name=" + enc)
-                .then(function () { okN++; return null; })
-                .catch(function (e) { fails.push({ name: names[idx], message: e.message }); });
-            })).then(function () {
-              toast("彻底删除记录:" + okN + "/" + names.length + " 成功", okN === names.length ? "ok" : "err");
-              if (fails.length) {
-                infoDlg("批量删除结果(" + fails.length + " 条失败)",
-                  fails.map(function (f) {
-                    return "<div style=\"display:flex;gap:10px;padding:3px 0;align-items:baseline;\"><b class=\"mono\">" + esc(f.name) +
-                      "</b><span style=\"color:var(--err);font-size:12px;\">" + esc(f.message || "失败") + "</span></div>";
-                  }).join(""));
-              }
-              clearSelection();
-              tick(true);
-            });
-          });
+          confirmRun({
+            title: "批量彻底删除实例记录(高危)",
+            danger: true,
+            phrase: "确认删除" + names.length + "条记录",
+            okLabel: "执行",
+            busyLabel: "删除中…",
+            bodyHtml: "将移除 <b>" + names.length + "</b> 个<b>已销毁</b>实例的控制台记录(容器已随销毁清理),<b>不可恢复</b>。<br>历史任务与审计日志留痕保留。",
+            run: function () {
+              var q = names.map(function (nm) { return encodeURIComponent(nm); });
+              return Promise.all(q.map(function (enc) {
+                return jpost("/api/rds/instance/delete?name=" + enc).then(function () { return null; }, function () { return null; });
+              }));
+            },
+          }).then(function () {
+            toast("批量彻底删除记录已提交", "ok");
+            clearSelection();
+            tick(true);
+          }).catch(function () { /* 错误已在弹窗内显示 */ });
           return;
         }
         function run() {
-          jpost("/api/rds/batch?action=" + action + "&names=" + encodeURIComponent(names.join(",")))
+          return jpost("/api/rds/batch?action=" + action + "&names=" + encodeURIComponent(names.join(",")))
             .then(function (d) {
               var rs = d.results || [];
               var okN = rs.filter(function (r) { return r.ok; }).length;
@@ -12354,17 +12483,29 @@
               }
               clearSelection();
               tick(true);
-            }).catch(function (e) { toast(e.message, "err"); });
+              return d;
+            });
         }
         if (action === "destroy") {
-          riskDlg("批量销毁(高危)",
-            "将销毁 <b>" + names.length + "</b> 个实例的全部容器与网络,<b>不可恢复</b>。",
-            "确认销毁" + names.length + "个实例", names).then(function (yes) { if (yes) run(); });
+          confirmRun({
+            title: "批量销毁(高危)",
+            danger: true,
+            phrase: "确认销毁" + names.length + "个实例",
+            okLabel: "执行",
+            busyLabel: "销毁中…",
+            bodyHtml: "将销毁 <b>" + names.length + "</b> 个实例的全部容器与网络,<b>不可恢复</b>。",
+            run: run,
+          }).catch(function () { /* 错误已在弹窗内显示 */ });
         } else {
-          confirmDlg(action === "disable" ? "批量停用 " + names.length + " 个实例" : "批量启用 " + names.length + " 个实例",
-            action === "disable"
+          confirmRun({
+            title: action === "disable" ? "批量停用 " + names.length + " 个实例" : "批量启用 " + names.length + " 个实例",
+            okLabel: action === "disable" ? "停用" : "启用",
+            busyLabel: "执行中…",
+            bodyHtml: action === "disable"
               ? "实例<b>仍运行</b>,停用后将拒绝扩容等常规变更(可随时启用)。<br>确认?"
-              : "将恢复所选实例的常规管理。<br>确认?", false).then(function (yes) { if (yes) run(); });
+              : "将恢复所选实例的常规管理。<br>确认?",
+            run: run,
+          }).catch(function () { /* 错误已在弹窗内显示 */ });
         }
       }
 
@@ -12650,19 +12791,24 @@
         if (!inst) return;
         var k = b.dataset.orphix.split(":");
         if (k[0] === "rollback") {
-          riskDlg("回滚受管切换", "回滚到最近一次切换前的旧主(受管 auto 切换,全程审计;失败自动回滚只读并告警)。", "确认回滚", [inst]).then(async function (yes) {
-            if (!yes) return;
-            try {
-              var r = await jpost("/api/rds/orch/rollback?instance=" + encodeURIComponent(inst));
-              toast("回滚已提交:" + (r.op_id || ""), "ok");
-            } catch (err) { toast(err.message, "err"); return; }
+          confirmRun({
+            title: "回滚受管切换",
+            danger: true,
+            okLabel: "确认回滚",
+            busyLabel: "回滚中…",
+            phrase: "确认回滚",
+            badges: [inst],
+            bodyHtml: "回滚到最近一次切换前的旧主(受管 auto 切换,全程审计;失败自动回滚只读并告警)。",
+            run: function () { return jpost("/api/rds/orch/rollback?instance=" + encodeURIComponent(inst)); },
+            okToast: function (r) { return "回滚已提交:" + (r.op_id || ""); },
+          }).then(function () {
             var n = 10;
             setInterval(function () {
               n--;
               if (shardDetailCur.inst === inst && shardDetailCur.id) renderShardDetail(inst, shardDetailCur.id);
               if (n <= 0) clearInterval(this);
             }, 5000);
-          });
+          }).catch(function () { /* 错误已在弹窗内显示 */ });
         } else if (k[0] === "switch") {
           doReparent(k[1]);
         }
@@ -12676,41 +12822,51 @@
         if (accessInst && accessInst.itype === "xenon") return; // xenon:切换/回滚走 raft 面板,忽略受管操作
         if (b.dataset.af != null) {
           var v = b.dataset.af === "1" ? "1" : "0";
-          jpost("/api/rds/meta?name=" + encodeURIComponent(inst) + "&k=auto_failover&v=" + v)
+          // 开关类:按钮上直接显示处理中,避免连点导致状态来回跳
+          withBtnBusy(b, v === "1" ? "开启中…" : "关闭中…", function () {
+            return jpost("/api/rds/meta?name=" + encodeURIComponent(inst) + "&k=auto_failover&v=" + v);
+          }, function () { return "自动故障转移:" + (v === "1" ? "已开启" : "已关闭"); })
             .then(function () {
               if (accessInst) accessInst.auto_failover = v === "1";
-              toast("自动故障转移:" + (v === "1" ? "已开启" : "已关闭"), "ok");
               renderTopoOrch(accessInst);
-            }).catch(function (err) { toast(err.message, "err"); });
+            }).catch(function () { /* 已 toast */ });
           return;
         }
         if (b.dataset.orchgo === "ers" || b.dataset.orchgo === "prs") {
           var target = (($("#topo-orch-target") || {}).value || "");
           var isPrs = b.dataset.orchgo === "prs";
-          riskDlg("主从切换(" + (isPrs ? "PRS·计划" : "ERS·自动") + ")",
-            "将提升 <b>" + (target ? esc(target) : "自动最佳候选(按事实/ack)") + "</b> 为主;旧主置只读并" +
-            (isPrs ? "优雅重挂为新主从(PRS 要求旧主在线)" : "尝试重挂(ERS 允许旧主不可达)") + "。<br>全程审计;失败自动回滚只读并降级告警。",
-            "确认切换", [inst]).then(async function (yes) {
-            if (!yes) return;
-            try {
-              var r = await jpost("/api/rds/orch/reparent?instance=" + encodeURIComponent(inst) +
+          confirmRun({
+            title: "主从切换(" + (isPrs ? "PRS·计划" : "ERS·自动") + ")",
+            danger: true,
+            okLabel: "确认切换",
+            busyLabel: "切换中…",
+            phrase: "确认切换",
+            badges: [inst],
+            bodyHtml: "将提升 <b>" + (target ? esc(target) : "自动最佳候选(按事实/ack)") + "</b> 为主;旧主置只读并" +
+              (isPrs ? "优雅重挂为新主从(PRS 要求旧主在线)" : "尝试重挂(ERS 允许旧主不可达)") + "。<br>全程审计;失败自动回滚只读并降级告警。",
+            run: function () {
+              return jpost("/api/rds/orch/reparent?instance=" + encodeURIComponent(inst) +
                 (target ? "&target=" + encodeURIComponent(target) : "") + "&mode=" + (isPrs ? "planned" : "auto"));
-              toast("受管切换已提交:" + (r.op_id || ""), "ok");
-            } catch (err) { toast(err.message, "err"); return; }
+            },
+            okToast: function (r) { return "受管切换已提交:" + (r.op_id || ""); },
+          }).then(function () {
             renderTopoOrch(accessInst);
             setTimeout(function () { if (accessInst && accessInst.name === inst) refreshDetail(true); }, 1500);
-          });
+          }).catch(function () { /* 错误已在弹窗内显示 */ });
           return;
         }
         if (b.dataset.orchops === "rollback") {
-          riskDlg("回滚受管切换", "回滚到最近一次切换前的旧主(受管 auto 切换,全程审计;失败自动回滚只读并告警)。", "确认回滚", [inst]).then(async function (yes) {
-            if (!yes) return;
-            try {
-              var r = await jpost("/api/rds/orch/rollback?instance=" + encodeURIComponent(inst));
-              toast("回滚已提交:" + (r.op_id || ""), "ok");
-            } catch (err) { toast(err.message, "err"); return; }
-            renderTopoOrch(accessInst);
-          });
+          confirmRun({
+            title: "回滚受管切换",
+            danger: true,
+            okLabel: "确认回滚",
+            busyLabel: "回滚中…",
+            phrase: "确认回滚",
+            badges: [inst],
+            bodyHtml: "回滚到最近一次切换前的旧主(受管 auto 切换,全程审计;失败自动回滚只读并告警)。",
+            run: function () { return jpost("/api/rds/orch/rollback?instance=" + encodeURIComponent(inst)); },
+            okToast: function (r) { return "回滚已提交:" + (r.op_id || ""); },
+          }).then(function () { renderTopoOrch(accessInst); }).catch(function () { /* 错误已在弹窗内显示 */ });
         }
       });
       bindXenonRaftZone(); // 页面级代理:处理 raft 面板内的刷新/切换按钮
@@ -12730,11 +12886,9 @@
         });
         var sc = $("#slow-collect");
         if (sc) sc.addEventListener("click", function () {
-          sc.disabled = true; sc.textContent = "采集中…";
-          jpost("/api/rds/slow/collect")
-            .then(function () { toast("已采集一轮(基线首轮后即有样本)", "ok"); if (accessInst) renderSlowTab(accessInst); })
-            .catch(function (e) { toast("采集失败:" + e.message, "err"); })
-            .finally(function () { sc.disabled = false; sc.textContent = "立即采集"; });
+          withBtnBusy(sc, "采集中…", function () { return jpost("/api/rds/slow/collect"); }, "已采集一轮(基线首轮后即有样本)")
+            .then(function () { if (accessInst) renderSlowTab(accessInst); })
+            .catch(function () { /* 已 toast */ });
         });
       })();
       (function bindDag() {
@@ -12793,7 +12947,7 @@
         var b = e.target.closest("[data-dal]");
         if (!b) return;
         var p = b.dataset.dal.split(":");
-        actAlertDetail(p[1], p[0]);
+        actAlertDetail(p[1], p[0], b);
       });
       $("#d-shard-filter").addEventListener("click", function () { shardQ = $("#d-shard-q").value; shardPage = 0; if (accessInst) renderShardList(accessInst); });
       $("#d-shard-q").addEventListener("keydown", function (e) { if (e.key === "Enter") { shardQ = e.target.value; shardPage = 0; if (accessInst) renderShardList(accessInst); } });
@@ -12959,7 +13113,7 @@
         var b = e.target.closest("[data-px]");
         if (!b) return;
         var parts = b.dataset.px.split(":");
-        proxyAct(parts[1], parts[0]);
+        proxyAct(parts[1], parts[0], b);
       });
       /* 代理批量与分页控件 */
       $("#px-sel-all").addEventListener("change", function () {
@@ -13112,11 +13266,32 @@
           p.set("dts_spec", dsp);
         }
         var btn = $("#c-submit");
-        btn.disabled = true;
+        // 点击提交后的「处理中」:按钮 spinner+文案、表单上锁(防误改/防重复提交)。
+        // 提交期间不清除,成功时切成「已提交…」再跳转;失败才解锁并就地报错。
+        lockCreateForm();
+        btnBusy(btn, true, "提交中…");
         jpost("/api/rds/create?" + p.toString())
-          .then(function (d) { toast("创建任务已提交:" + d.task_id, "ok"); setRoute("#/instances"); tick(true); })
-          .catch(function (e) { $("#c-err").textContent = e.message; })
-          .finally(function () { btn.disabled = false; });
+          .then(function (d) {
+            // 任务已受理:给出明确的阶段变化,而不是瞬间跳走(避免"我到底点上没有")
+            btnBusy(btn, true, "已提交,正在进入实例列表…");
+            toast("创建任务已提交:" + d.task_id, "ok");
+            setRoute("#/instances");
+            tick(true);
+          })
+          .catch(function (e) {
+            unlockCreateForm();
+            btnBusy(btn, false);
+            $("#c-err").textContent = e.message;
+          });
+      }
+      function lockCreateForm() {
+        var form = $("#c-step-form");
+        if (form) { form.classList.add("is-locked"); form.setAttribute("aria-busy", "true"); }
+      }
+      function unlockCreateForm() {
+        var form = $("#c-step-form");
+        if (form) { form.classList.remove("is-locked"); form.removeAttribute("aria-busy"); }
+        btnBusy($("#c-submit"), false);
       }
       function cancelCreate() { setRoute("#/instances"); }
       function renderComposition(i) {
@@ -13224,23 +13399,28 @@
         mode = mode || "auto";
         var target = forceTarget || (($("#rp-target") || {}).value || "");
         var modeLab = mode === "planned" ? "PRS(计划)" : "ERS(auto)";
-        riskDlg("受管主从切换(" + modeLab + ")",
-          "将提升 <b>" + (target ? esc(target) : "自动最佳候选(按事实/ack)") + "</b> 为主;旧主置只读并" +
-          (mode === "planned" ? "优雅重挂为新主从(PRS 要求旧主在线)" : "尝试重挂(ERS 允许旧主不可达)") + "。<br>全程审计;失败自动回滚只读并降级告警。",
-          "确认切换", [inst]).then(async function (yes) {
-          if (!yes) return;
-          try {
-            var r = await jpost("/api/rds/orch/reparent?instance=" + encodeURIComponent(inst) +
+        confirmRun({
+          title: "受管主从切换(" + modeLab + ")",
+          danger: true,
+          okLabel: "确认切换",
+          busyLabel: "切换中…",
+          phrase: "确认切换",
+          badges: [inst],
+          bodyHtml: "将提升 <b>" + (target ? esc(target) : "自动最佳候选(按事实/ack)") + "</b> 为主;旧主置只读并" +
+            (mode === "planned" ? "优雅重挂为新主从(PRS 要求旧主在线)" : "尝试重挂(ERS 允许旧主不可达)") + "。<br>全程审计;失败自动回滚只读并降级告警。",
+          run: function () {
+            return jpost("/api/rds/orch/reparent?instance=" + encodeURIComponent(inst) +
               (target ? "&target=" + encodeURIComponent(target) : "") + "&mode=" + mode);
-            toast("受管切换已提交:" + (r.op_id || ""), "ok");
-          } catch (e) { toast(e.message, "err"); return; }
+          },
+          okToast: function (r) { return "受管切换已提交:" + (r.op_id || ""); },
+        }).then(function () {
           var n = 12;
           setInterval(function () {
             n--;
             if (shardDetailCur.inst === inst && shardDetailCur.id) renderShardDetail(inst, shardDetailCur.id);
             if (n <= 0) clearInterval(this);
           }, 5000);
-        });
+        }).catch(function () { /* 错误已在弹窗内显示 */ });
       }
       // 偏差横幅:编排事实主 ≠ 登记主 → 高亮 + 一键按事实切换
       // xenon raft 说明横幅(分片详情顶部):自主选主、无受管切换/回滚
@@ -13383,16 +13563,21 @@
           }
           if (t.dataset.xenonrole === "tryleader") {
             var node = t.dataset.node;
-            riskDlg("切换 raft leader 到 " + node,
-              "将向 <b>" + esc(node) + "</b> 发起 raft 竞选(xenoncli raft trytoleader)。<br>" +
-              "旧 leader 将让位、进入新的选主流程,需多数派成员达成一致后切换完成;期间存在<b>短暂的不可写窗口</b>(秒级)。" +
-              "全程审计;若节点数据未追平或半同步 ack 不足,竞选会失败并保持原角色。",
-              "发起竞选", [inst]).then(async function (yes) {
-              if (!yes) return;
-              try {
-                var r = await jpost("/api/rds/xenon/raft/trytoleader?instance=" + encodeURIComponent(inst) + "&node=" + encodeURIComponent(node));
-                toast("已发起竞选:" + (r.message || "ok"), "ok");
-              } catch (err) { toast(err.message, "err"); return; }
+            confirmRun({
+              title: "切换 raft leader 到 " + node,
+              danger: true,
+              okLabel: "发起竞选",
+              busyLabel: "竞选中…",
+              phrase: "发起竞选",
+              badges: [inst],
+              bodyHtml: "将向 <b>" + esc(node) + "</b> 发起 raft 竞选(xenoncli raft trytoleader)。<br>" +
+                "旧 leader 将让位、进入新的选主流程,需多数派成员达成一致后切换完成;期间存在<b>短暂的不可写窗口</b>(秒级)。" +
+                "全程审计;若节点数据未追平或半同步 ack 不足,竞选会失败并保持原角色。",
+              run: function () {
+                return jpost("/api/rds/xenon/raft/trytoleader?instance=" + encodeURIComponent(inst) + "&node=" + encodeURIComponent(node));
+              },
+              okToast: function (r) { return "已发起竞选:" + (r.message || "ok"); },
+            }).then(function () {
               // 等待选主稳定后刷新角色与卡片
               var n = 12;
               var iv = setInterval(function () {
@@ -13406,7 +13591,7 @@
                   }).catch(function () { });
                 }
               }, 5000);
-            });
+            }).catch(function () { /* 错误已在弹窗内显示 */ });
           }
         });
       }
@@ -14010,11 +14195,13 @@
         ["cleanup", "清理"], ["command", "命令"], ["other", "其他"]
       ];
       function modCatLabel(v) { for (var i = 0; i < MOD_CATS.length; i++) if (MOD_CATS[i][0] === v) return MOD_CATS[i][1]; return v; }
+      /* 步骤模板:口令一律留空 → 后端按实例统一 root 口令填充(见 instance.rs::step_pass),
+         页面/源码不再出现任何明文口令。 */
       var MOD_STEP_TYPES = [
-        ["ExecSql", "执行 SQL", '{"container":"{instance}","user":"root","pass":"rds_root_2024","sql":"SELECT 1"}'],
+        ["ExecSql", "执行 SQL", '{"container":"{instance}","user":"root","pass":"","sql":"SELECT 1"}'],
         ["DockerExec", "容器内命令", '{"container":"{instance}","args":["sh","-c","echo hi"]}'],
         ["WriteHostFile", "写配置/文件", '{"path":"logs/rds/{instance}/note.txt","content":"hello"}'],
-        ["WaitMysql", "等待 MySQL 就绪", '{"container":"{instance}","user":"root","pass":"rds_root_2024","timeout_secs":120}'],
+        ["WaitMysql", "等待 MySQL 就绪", '{"container":"{instance}","user":"root","pass":"","timeout_secs":120}'],
         ["DockerRm", "移除容器", '{"container":"{instance}"}'],
         ["Noop", "说明/占位", '{"note":"说明"}']
       ];
@@ -14162,15 +14349,20 @@
           if (!insts.length) { toast("暂无运行中实例可供运行模块", "err"); return; }
           var body = '<select class="inp" id="mod-run-inst" style="width:100%;">' +
             insts.map(function (i) { return '<option value="' + esc(i.name) + '">' + esc(i.name) + "</option>"; }).join("") + "</select>";
-          openModal({ title: "运行模块 · " + mname, bodyHtml: body, okLabel: "提交运行" }).then(function (r) {
-            if (!r.ok) return;
-            var inst = $("#mod-run-inst").value;
-            var p = new URLSearchParams();
-            p.set("name", mname); p.set("instance", inst);
-            jpost("/api/rds/module/run?" + p.toString()).then(function (d2) {
-              toast("模块任务已提交:" + d2.task_id, "ok");
-              renderModules(); STATE.sig.tasks = ""; tick(true);
-            }).catch(function (e) { toast(e.message, "err"); });
+          openModal({
+            title: "运行模块 · " + mname,
+            bodyHtml: body,
+            okLabel: "提交运行",
+            busyLabel: "提交中…",
+            onOk: function () {
+              var inst = $("#mod-run-inst").value;
+              var p = new URLSearchParams();
+              p.set("name", mname); p.set("instance", inst);
+              return jpost("/api/rds/module/run?" + p.toString()).then(function (d2) {
+                toast("模块任务已提交:" + d2.task_id, "ok");
+                renderModules(); STATE.sig.tasks = ""; tick(true);
+              });
+            }
           });
         }).catch(function (e) { toast("加载实例失败:" + e.message, "err"); });
       }
@@ -14198,12 +14390,18 @@
           });
         } else if (op === "run") { moduleRunDlg(name); }
         else if (op === "del") {
-          confirmDlg("删除功能模块", "确认删除模块 <b>" + esc(name) + "</b>?历史任务不受影响。", false).then(function (yes) {
-            if (!yes) return;
-            var p = new URLSearchParams(); p.set("name", name);
-            jpost("/api/rds/module/delete?" + p.toString()).then(function () { toast("已删除:" + name, "ok"); renderModules(); })
-              .catch(function (e) { toast(e.message, "err"); });
-          });
+          confirmRun({
+            title: "删除功能模块",
+            danger: true,
+            okLabel: "删除",
+            busyLabel: "删除中…",
+            bodyHtml: "确认删除模块 <b>" + esc(name) + "</b>?历史任务不受影响。",
+            run: function () {
+              var p = new URLSearchParams(); p.set("name", name);
+              return jpost("/api/rds/module/delete?" + p.toString());
+            },
+            okToast: "已删除:" + name,
+          }).then(function () { renderModules(); }).catch(function () { /* 错误已在弹窗内显示 */ });
         }
       }
       function planNodesFor(kind, p) {
@@ -14338,6 +14536,9 @@
       function dagSubmit() {
         var err = $("#dag-err");
         err.textContent = "";
+        var btn = $("#dag-submit");
+        function busy(txt) { btnBusy(btn, true, txt || "提交中…"); }
+        function idle() { btnBusy(btn, false); }
         var k = dagState.kind;
         if (k === "create") {
           var name = (($("#dag-name") || {}).value || "").trim();
@@ -14348,15 +14549,26 @@
           var p = new URLSearchParams();
           p.set("name", name); p.set("itype", dagState.itype); p.set("proxies", dagState.prox); p.set("shard_num", String(shard));
           if (dagState.itype === "xenon") p.set("xenon_nodes", "3");
-          jpost("/api/rds/create?" + p.toString()).then(function (d) { toast("创建任务已提交:" + d.task_id, "ok"); setRoute("#/tasks"); tick(true); }).catch(function (e) { err.textContent = e.message; });
+          busy();
+          jpost("/api/rds/create?" + p.toString())
+            .then(function (d) { busy("已提交,正在进入任务中心…"); toast("创建任务已提交:" + d.task_id, "ok"); setRoute("#/tasks"); tick(true); })
+            .catch(function (e) { idle(); err.textContent = e.message; });
           return;
         }
         var inst = dagSelectedInstance();
         if (!inst) { err.textContent = "请先选择目标实例"; return; }
         if (k === "destroy") {
           if (!hasPerm("instances.destroy")) { err.textContent = "无 instances.destroy 权限"; return; }
-          riskDlg("销毁实例(高危)", '将销毁 <b>' + esc(inst) + '</b> 的全部容器与网络,不可恢复。<br>请输入实例名确认。', inst)
-            .then(function (yes) { if (!yes) return; jpost("/api/rds/destroy?name=" + encodeURIComponent(inst)).then(function (d) { toast("销毁任务已提交:" + d.task_id, "ok"); setRoute("#/tasks"); tick(true); }).catch(function (e) { err.textContent = e.message; }); });
+          confirmRun({
+            title: "销毁实例(高危)",
+            danger: true,
+            phrase: inst,
+            okLabel: "执行",
+            busyLabel: "销毁中…",
+            bodyHtml: '将销毁 <b>' + esc(inst) + '</b> 的全部容器与网络,不可恢复。<br>请输入实例名确认。',
+            run: function () { return jpost("/api/rds/destroy?name=" + encodeURIComponent(inst)); },
+            okToast: function (d) { return "销毁任务已提交:" + d.task_id; },
+          }).then(function () { setRoute("#/tasks"); tick(true); }).catch(function () { /* 错误已在弹窗内显示 */ });
           return;
         }
         if (k === "scaleout") {
@@ -14365,11 +14577,17 @@
           var reg = (($("#dag-region") || {}).value || "").trim();
           var az = (($("#dag-az") || {}).value || "").trim();
           var q = "/api/rds/scaleout?name=" + encodeURIComponent(inst) + "&role=" + role + (reg ? "&region=" + encodeURIComponent(reg) : "") + (az ? "&az=" + encodeURIComponent(az) : "");
-          jpost(q).then(function (d) { toast("扩容任务已提交:" + d.task_id, "ok"); setRoute("#/tasks"); tick(true); }).catch(function (e) { err.textContent = e.message; });
+          busy("扩缩容提交中…");
+          jpost(q)
+            .then(function (d) { busy("已提交,正在进入任务中心…"); toast("扩容任务已提交:" + d.task_id, "ok"); setRoute("#/tasks"); tick(true); })
+            .catch(function (e) { idle(); err.textContent = e.message; });
         }
         if (k === "backup") {
           if (!hasPerm("instances.manage")) { err.textContent = "无 instances.manage 权限"; return; }
-          jpost("/api/rds/backup?name=" + encodeURIComponent(inst)).then(function (d) { toast("备份任务已提交:" + d.task_id, "ok"); setRoute("#/tasks"); tick(true); }).catch(function (e) { err.textContent = e.message; });
+          busy("备份提交中…");
+          jpost("/api/rds/backup?name=" + encodeURIComponent(inst))
+            .then(function (d) { busy("已提交,正在进入任务中心…"); toast("备份任务已提交:" + d.task_id, "ok"); setRoute("#/tasks"); tick(true); })
+            .catch(function (e) { idle(); err.textContent = e.message; });
         }
       }
 
@@ -14386,20 +14604,24 @@
         }
         return s;
       }
-      function taskAct(kind, id) {
+      function taskAct(kind, id, btn) {
         if (kind === "start") {
-          jpost("/api/rds/task/start?task=" + encodeURIComponent(id))
-            .then(function (d) { toast(d.message || "已启动", "ok"); tick(true); })
-            .catch(function (e) { toast(e.message, "err"); });
+          withBtnBusy(btn, "启动中…", function () {
+            return jpost("/api/rds/task/start?task=" + encodeURIComponent(id));
+          }, function (d) { return d.message || "已启动"; })
+            .then(function () { tick(true); }).catch(function () { /* 已 toast */ });
         } else if (kind === "edit") {
           openDraftEditor(id);
         } else if (kind === "delete") {
-          confirmDlg("删除任务 " + id, "仅终态任务可删除;将从任务列表与历史移除(审计留痕)。<br>确认?", true).then(function (yes) {
-            if (!yes) return;
-            jpost("/api/rds/task/delete?task=" + encodeURIComponent(id))
-              .then(function () { toast("任务已删除(归档)", "ok"); tick(true); })
-              .catch(function (e) { toast(e.message, "err"); });
-          });
+          confirmRun({
+            title: "删除任务 " + id,
+            danger: true,
+            okLabel: "删除",
+            busyLabel: "删除中…",
+            bodyHtml: "仅终态任务可删除;将从任务列表与历史移除(审计留痕)。<br>确认?",
+            run: function () { return jpost("/api/rds/task/delete?task=" + encodeURIComponent(id)); },
+            okToast: "任务已删除(归档)",
+          }).then(function () { tick(true); }).catch(function () { /* 错误已在弹窗内显示 */ });
         }
       }
       /* 草稿节点编辑器(新建 null / 编辑 id) */
@@ -14417,7 +14639,7 @@
               '<button class="btn btn-ghost btn-sm" id="draft-add" style="margin-top:6px;">+ 添加节点</button></div>' +
               '<div class="dlg-err" id="draft-err"></div>' +
               '<div class="d-foot"><button class="btn btn-ghost btn-sm" data-a="no">取消</button>' +
-              '<button class="btn btn-primary btn-sm" data-a="yes">' + esc(id ? "保存修改" : "创建草稿") + "</button></div></div>";
+              '<button class="btn btn-primary btn-sm" id="draft-ok" data-a="yes">' + esc(id ? "保存修改" : "创建草稿") + "</button></div></div>";
             $("#modal-root").appendChild(ov);
             var list = ov.querySelector("#draft-rows");
             function paint() {
@@ -14465,10 +14687,10 @@
           var url = id
             ? "/api/rds/task/edit?task=" + encodeURIComponent(id) + "&nodes=" + encNodes
             : "/api/rds/task/draft?instance=&nodes=" + encNodes;
-          jpost(url).then(function (d) {
-            toast(id ? "草稿已更新" : ("草稿已创建:" + (d.task_id || "")), "ok");
-            tick(true);
-          }).catch(function (e) { toast(e.message, "err"); });
+          var dbtn = $("#draft-ok");
+          withBtnBusy(dbtn, "提交中…", function () { return jpost(url); },
+            function (d) { return id ? "草稿已更新" : ("草稿已创建:" + (d.task_id || "")); })
+            .then(function () { tick(true); }).catch(function () { /* 已 toast */ });
         }
         if (id) {
           jget("/api/rds/task?id=" + encodeURIComponent(id)).then(function (d) {
