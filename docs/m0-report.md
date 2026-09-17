@@ -48,7 +48,10 @@ list_filtered(region,page200): ~55 ms    (10k 内存筛选+投影;M1 换分片�
 ## 4. 遗留与 M1 入口(按设计文档路线)
 
 - MySQL CLI 每语句 spawn → 连接池(async driver,M1,组件决策=仅 MySQL+语言栈);
-- Executor/Agent 抽象与双实现(本机 docker + k8s 占位)——M1;
+- ~~Executor/Agent 抽象与双实现(本机 docker + k8s 占位)~~ —— **已落地(P0/P1,2026-09)**:
+  `src/exec/` 统一 `WorkloadRuntime` 抽象 + docker/agent/外部驱动三实现(见
+  [container-platform-abstraction.md](./container-platform-abstraction.md));k8s/OpenStack/自研
+  经外部驱动接入,节点供给层(NodeProvider)与端点抽象仍为后续期次;
 - 分片缓存化 list 查询与 keyset 游标 —— M1;
 - 审计分表+保留、事件驱动巡检、队列 worker 多副本 —— M1;
 - 重启续跑经 RDSCTL_RESUME_TASKS 已可用(M0-5 语义),大规模自动续跑策略随队列

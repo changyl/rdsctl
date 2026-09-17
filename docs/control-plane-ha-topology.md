@@ -2,6 +2,7 @@
 
 > 配套:[control-plane-ha-design.md](./control-plane-ha-design.md)(设计与契约)、
 > [control-plane-ha-acceptance.md](./control-plane-ha-acceptance.md)(验收锚点)、
+> [deployment-architecture.md](./deployment-architecture.md)(部署架构图 / 部署图:部署视角的节点、端口、制品、目录)、
 > [ops-guide-cluster.md](./ops-guide-cluster.md)(运维)、
 > [control-plane-cluster-view.md](./control-plane-cluster-view.md)(运维面页面)、
 > [session-rbac-consensus.md](./session-rbac-consensus.md)(会话/RBAC 入状态机)。

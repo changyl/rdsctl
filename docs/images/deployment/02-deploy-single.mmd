@@ -1,0 +1,25 @@
+flowchart TB
+  subgraph DEV["«device» 开发机 / lab 宿主(macOS 或 Linux)"]
+    subgraph ENVS["«execution environment» 前台或 nohup 单进程(scripts/rdsctl.sh)"]
+      SINGLE["«artifact» /opt/rdsctl/rdsctl<br/>命令: rdsctl --port 9113<br/>模式: single"]
+      WEB["«artifact» 内嵌前端 rds.html / login.html<br/>由 include_str! 编进二进制"]
+      LVS["«artifact» 进程内 LVS 4 层转发器<br/>127.0.0.1:{lvs_mysql_port}"]
+    end
+    MY["«artifact» 控制库 MySQL(捆绑实例)<br/>mysqld :3306 · datadir .rdsctl-mysql · db=rdsctl<br/>single 模式下即权威状态"]
+    DKD["«artifact» docker daemon + 实例容器<br/>rds-{name}-master / -slave-N / -proxy-K"]
+    LOG["«artifact» logs/<br/>rdsctl-9113.pid · rdsctl-9113.log"]
+  end
+
+  U["浏览器 / 脚本"] -->|"HTTP :9113(手写 HTTP/1.1,无 TLS)"| SINGLE
+  SINGLE -->|"mysql CLI: 每语句一进程<br/>MYSQL_PWD 传密码"| MY
+  SINGLE -->|"docker CLI:本机直连<br/>无 agent,fence 无资源侧强执"| DKD
+  LVS -->|"TCP round-robin"| DKD
+  SINGLE -.-> LOG
+
+  NOTE["边界与硬顶<br/>· 单机硬顶 ≤5k 实例(每实例 ≥5 个宿主端口,端口池 35000..60000)<br/>· 无多数派仲裁:进程挂 = 控制面停<br/>· 互斥来自控制库行锁,不是共识租约"]
+  NOTE -.-> SINGLE
+
+  classDef art fill:#e8f0fe,stroke:#1a73e8,color:#0b1f3a
+  classDef warn fill:#fce8e6,stroke:#d93025,color:#3c0a06
+  class SINGLE,WEB,LVS,MY,DKD,LOG art
+  class NOTE warn

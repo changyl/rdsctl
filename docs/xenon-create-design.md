@@ -3,8 +3,8 @@
 > 需求:参考 xenon 项目 `deploy/xenon.sh` 部署脚手架,在 rdsctl 管控面实现 xenon 实例创建;
 > xenon 只通过 raft 做故障转移,创建时可选在集群前部署 **rsproxy(newproxy)** 接入层
 > (自动发现并跟随 raft leader,提供三种读一致性档位)。
-> xenon 仓库(只读参考):`/Users/didi/CLionProjects/xenon`(Go,基于 MySQL 8.0 的 raft MySQL HA)。
-> rsproxy 仓库(只读参考):`/Users/didi/CLionProjects/rsproxy`(Rust 代理;HA 适配见其 docs/15-xenon-ha.md)。
+> xenon 仓库(只读参考):本地 `xenon` 检出(Go,基于 MySQL 8.0 的 raft MySQL HA)。
+> rsproxy 仓库(只读参考):本地 `rsproxy` 检出(Rust 代理;HA 适配见其 docs/15-xenon-ha.md)。
 
 ## 1. 参考实现读解(xenon/deploy + rsproxy/src/ha)
 

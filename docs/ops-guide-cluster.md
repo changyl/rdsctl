@@ -2,6 +2,7 @@
 
 > 配套:[control-plane-ha-design.md](./control-plane-ha-design.md)(设计与前提)、
 > [control-plane-ha-acceptance.md](./control-plane-ha-acceptance.md)(验收)、
+> [deployment-architecture.md](./deployment-architecture.md)(部署架构图 / 部署图:进程、端口、制品、目录)、
 > [deploy/README.md](../deploy/README.md)(守护与自检安装)。
 >
 > **状态标记**:本文区分两类内容 ——
@@ -45,6 +46,12 @@
 | A4 | 每台宿主机 agent 在线 | `curl -s $RDSCTL_AGENT_URL/agent/ping` 且 `fence_capable:true` | 拒绝启动(否则 fence 无法强制) |
 | A5 | 守护已安装(systemd/launchd) | `systemctl is-enabled rdsctl@node1` / `launchctl list \| grep rdsctl` | 崩溃后无人拉起,副本数静默减少 |
 | A6 | 所有副作用 Step 可声明幂等键 | M1a 启动期静态校验(缺则拒绝启动) | 拒绝启动 |
+| A7 | **时间参数与实测网络同档**:`选举超时 ≥ 4 ×` 单次 RPC 往返;丢包 ≤ `RDSCTL_MAX_PEER_LOSS_PCT`(默认 20%) | preflight 第 6 项(每 peer 五次取最小)+ 进程内 `SelfCheck.network_ok`;`/readyz` 看 `selfcheck.network_ok` / `premises_unverified: A7_network` | 拒绝启动;lab 可 `RDSCTL_ALLOW_SLOW_NETWORK=1` 放行并持续标注 |
+
+> **跨区(中国/美东/欧洲)部署必须逐项对齐 A7**:见 [control-plane-ha-design.md §20](./control-plane-ha-design.md)。
+> 一句话口径:**选举超时 ≥ 4×实测 RPC 往返**(跨区建议 6–8×),`RDSCTL_HEARTBEAT_MS` 不设即按
+> `min(300, 选举下限/4)` 自动收窄;`RDSCTL_MAX_SKEW_MS` 是**租约安全参数**,不要为了"消掉单程延迟"放宽它
+> (单程延迟已由 RTT 修正剔除)。
 
 一次性全量自检:
 
@@ -136,9 +143,10 @@ done
 | 指标 | 阈值建议 | 含义 |
 |---|---|---|
 | `readyz{ready=false}` 持续 | > 30s | 该副本不可接流量 |
-| `skew_measured_ms` | > 500(告警)/ > 1000(拒绝授予) | A1 恶化趋势 |
-| 共识提交延迟 p99 | 单 AZ > 50ms / 跨 AZ > 200ms | 磁盘或网络劣化 |
-| leader 切换次数 | 突增 | 选举震荡(网络抖动/负载) |
+| `skew_measured_ms` | > 500(告警)/ > 1000(拒绝授予) | A1 恶化趋势。**口径已修正**:该值是**剔除单程延迟后**的估计(§20.2);`skew_latest_ms` 仍是含延迟的原始上界,两者之差 = 被剔掉的延迟量级 |
+| `selfcheck.network_ok` / `premises_unverified: A7_network` | 出现即处理 | 时间参数与实测网络不同档(跨区首害);按 §20.6 放大 `RDSCTL_ELECTION_TIMEOUT_MS` |
+| 共识提交延迟 p99 | 单 AZ > 50ms / 跨 AZ > 200ms / **跨区 > 800ms** | 磁盘或网络劣化 |
+| leader 切换次数 | 突增 | 选举震荡(网络抖动/负载);**跨区部署这是首要排查项** —— 先看 A7 与 `RDSCTL_MAX_PEER_RTT_MS` |
 | `fence_rejected_total` | 突增 | 出现僵尸副本或反复接管 |
 | `sink_lag_index` | 持续增长 | 投影阻塞(分析视图滞后) |
 | `fsync_failed_total` | > 0 | A2 受损,**立即处理** |

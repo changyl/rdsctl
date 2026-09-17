@@ -289,6 +289,17 @@ P2:`migrate_instance` 工作流(编排 §4.2 状态机)、region/az 由「标签
    - 执行路由:`resolve_route_of()` → `Local | Agent{url} | Unmanaged`;巡检节点健康、
      `orch/facts`、degrade 快照、自动 ERS 全部按路由执行——绑定 Host 且 agent 可达的节点
      由 agent 跑 docker;agent 失联标记 `remote`(管理盲区,不误判容器缺失、不喂给 ERS)。
+   - **平台无关化(P0/P1,2026-09)**:agent 启动时用 `--runtime` / `--runtime-cmd` /
+     `RDSCTL_RUNTIME` 选定**本机执行后端**,控制面只发平台无关原语
+     (`/agent/create|start|stop|remove|rename|exists|state|logs|exec|write_file|network/*`)。
+     历史端点保留为等价别名;`/agent/docker`(裸 CLI 透传)已废弃。
+     「这台物理机上跑 docker 还是 k8s/自研平台」由此收敛在 agent 一处,控制面零改动 ——
+     见 [container-platform-abstraction.md](./container-platform-abstraction.md) §6。
+   - **去特权已落地(P2,2026-09)**:cluster 模式 + 配置 `RDSCTL_AGENT_URL` 时,`NodeRoute::Local`
+     也解析为 agent 执行 —— 全部容器操作不再有本机直连旁路;只读探针走免 fence 通道
+     (`/agent/exec_raw`),变更走受 fence 约束的通道。详见
+     [container-platform-abstraction.md](./container-platform-abstraction.md) §6.2–6.5。
+     ⏳ 待补(P2 剩余):`rds_hosts.runtime`/`agent_version` 字段与上报一致性校验、`host_probe` 实测事实。
    - 验收:真实 drill `scripts/agent-drill.sh`(单机双进程):facts `via=agent`;kill agent →
      degraded + 节点 `remote`;重启 → 恢复 running;清理干净。`cargo test` 95 全绿。
 2. **`replace_node` 工作流** ✅

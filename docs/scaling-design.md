@@ -49,7 +49,7 @@
 
 | 项 | 结论 |
 |---|---|
-| 数据面承载 | **双实现**:`Executor/Agent` trait 抽象先行;提供本机 docker 实现(保留)与 k8s 实现;控制面不绑定 k8s |
+| 数据面承载 | **双实现**:`Executor/Agent` trait 抽象先行;提供本机 docker 实现(保留)与 k8s 实现;控制面不绑定 k8s。**已落地(P0/P1,2026-09)**:`WorkloadRuntime` 抽象 + docker/agent/外部驱动三实现,接入新平台通常零代码 —— 见 [container-platform-abstraction.md](./container-platform-abstraction.md) 与 [ops-guide-container-platform.md](./ops-guide-container-platform.md) |
 | 组件约束 | **仅 MySQL + 语言栈**:任务队列基于 MySQL(与锁/状态同库保证一致性);审计归档落文件/对象存储;不引入 Redis/Kafka(吞吐不足再议) |
 | 规模基线 | 单 shard ≤1 万实例;单 region ≤3 万;全量 10 万;生命周期操作 ~百次/实例/月;审计热 30 天 + 归档 |
 | 多租户 | M0 数据模型加入 `tenant/owner` 列与审计归属占位;RBAC 后续里程碑启用 |
@@ -214,6 +214,9 @@
   retry 策略字段入队。验收:合成 1 万实例指标 + 原 P0 三项回归全绿。
 - **M1 区域内多机**:Executor/Agent 双实现收口(本机 docker 保留 + k8s 实现占位)、
   端点 registry 化、队列 worker 多副本、事件驱动巡检、审计分表保留。
+  **执行面抽象已提前落地(P0/P1)**:`src/exec/`(WorkloadRuntime/docker/agent/external),
+  k8s 经外部驱动可接入;剩余(端点 registry 化)见
+  [container-platform-abstraction.md](./container-platform-abstraction.md) §8。
   **M1 增补登记(源自 docs/ai-roadmap.md v2 与 docs/ai0-impl-checklist.md;只登记排期,
   随对应子项落地,不做提前实现)**:
   - **M1a 任务级重试 / 单任务重跑入口**:随 §7.2 retry 策略与队列 claim/requeue 语义落地

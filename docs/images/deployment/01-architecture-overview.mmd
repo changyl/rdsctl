@@ -1,0 +1,48 @@
+flowchart TB
+  subgraph CLIENTS["客户端"]
+    C1["浏览器<br/>内嵌 SPA: /rds · /login"]
+    C2["运维脚本 / curl"]
+    C3["外部 API 客户端"]
+  end
+
+  LB["接入层(部署层增强,不在仓库交付物内)<br/>DNS 多地址 / LB / VIP<br/>入口 = 多地址清单 · RTO ≤5s,客户端需重连<br/>不承诺单 VIP 无缝漂移"]
+
+  CLIENTS -->|"HTTP :9113"| LB
+
+  subgraph CP["控制面集群 rdsctl serve · voter 必须为奇数 ≥3"]
+    N1["副本 node1<br/>:9113 公开 · :9330 RPC<br/>gateway+controller+ingress 同进程"]
+    N2["副本 node2 ★leader<br/>:9113 公开 · :9330 RPC"]
+    N3["副本 node3<br/>:9113 公开 · :9330 RPC"]
+  end
+  LB -->|"GET /readyz 判定接流量"| CP
+  N1 <-->|"Raft 复制 / 提案转发<br/>HTTP :9330 · X-Cluster-Token"| N2
+  N2 <-->|"Raft 复制"| N3
+  N1 <-->|"Raft 复制"| N3
+
+  SM["共识状态机 · 每副本一份<br/>租约 lease+fence · 步骤账本(有效一次)<br/>会话/RBAC · 审计尾<br/>DATA_DIR 每副本独立,禁网络文件系统"]
+  CP -.->|"每副本一份"| SM
+
+  subgraph EP["执行面 · 每台宿主机一个 agent(rdsctl agent :9190)"]
+    AG["rdsctl agent :9190<br/>x-agent-token 鉴权<br/>fence 资源侧强执 · 幂等回放"]
+    DK["docker CLI → dockerd → 实例容器<br/>rds-{name}-master / -slave-N / -proxy-K / -xenonN"]
+    AG -->|"docker CLI"| DK
+  end
+  SM ==>|"变更指令 :9190<br/>x-rdsctl-fence + x-rdsctl-idem"| EP
+
+  SINK[("元数据 MySQL sink :3306<br/>读模型 / 审计 / 分析<br/>单向幂等投影,不在正确性路径")]
+  SM -.->|"每 5s 投影 proj:shard:index"| SINK
+
+  subgraph DEP["部署前提与旁路依赖"]
+    EXT["正确性前提 · 缺一即拒绝启动<br/>A1 NTP/chrony · A2 本地盘 fsync · A3 奇数 ≥3 voter<br/>A4 agent fence_capable · A5 进程守护 · A7 网络预算同档"]
+    AUX["旁路依赖 · 可缺,只降级视图<br/>镜像 registry · 外部备份平台(默认关) · 监控/分析页面"]
+  end
+  DEP -.-> CP
+
+  classDef cp fill:#e8f0fe,stroke:#1a73e8,color:#0b1f3a
+  classDef exec fill:#e6f4ea,stroke:#1e8e3e,color:#0b2b16
+  classDef sink fill:#fef7e0,stroke:#f9ab00,color:#3c2b00
+  classDef aux fill:#f1f3f4,stroke:#5f6368,color:#202124
+  class N1,N2,N3,SM cp
+  class AG,DK exec
+  class SINK sink
+  class LB,EXT,AUX,C1,C2,C3 aux

@@ -1,0 +1,70 @@
+flowchart LR
+  LB["«device» DNS 多地址 / LB<br/>探针 GET /readyz"]
+
+  subgraph A["«device» 控制节点 A · 10.0.0.1"]
+    direction TB
+    subgraph AC["«execution environment» systemd rdsctl@node1"]
+      AB["«artifact» rdsctl serve --node-id=node1<br/>--port 9113 --rpc-port 9330<br/>--cluster=1@10.0.0.1:9330,2@...,3@..."]
+      AE["«artifact» /etc/rdsctl/rdsctl.env + node1.env<br/>ExecStartPre = rdsctl-preflight.sh node1"]
+      AD[("«artifact» DATA_DIR=/var/lib/rdsctl/node1<br/>shard-0/log(哈希链) · hard_state.json<br/>snapshot.json · projection.cursor")]
+    end
+    subgraph AA["«execution environment» systemd rdsctl-agent@hostA"]
+      AG["«artifact» rdsctl agent --port 9190<br/>Requires=docker.service · docker 组"]
+      ADK["«artifact» dockerd → 本机实例容器"]
+      AG -->|"docker CLI"| ADK
+    end
+  end
+
+  subgraph B["«device» 控制节点 B · 10.0.0.2"]
+    direction TB
+    subgraph BC["«execution environment» rdsctl@node2"]
+      BB["«artifact» rdsctl serve --node-id=node2<br/>--port 9113 --rpc-port 9330"]
+      BD[("«artifact» DATA_DIR=/var/lib/rdsctl/node2<br/>必须独立,不得共享")]
+    end
+    subgraph BA["«execution environment» rdsctl-agent@hostB"]
+      BAG["«artifact» rdsctl agent --port 9190"]
+    end
+  end
+
+  subgraph C["«device» 控制节点 C · 10.0.0.3"]
+    direction TB
+    subgraph CC["«execution environment» rdsctl@node3"]
+      CB["«artifact» rdsctl serve --node-id=node3<br/>--port 9113 --rpc-port 9330"]
+      CD[("«artifact» DATA_DIR=/var/lib/rdsctl/node3<br/>必须独立,不得共享")]
+    end
+    subgraph CA["«execution environment» rdsctl-agent@hostC"]
+      CAG["«artifact» rdsctl agent --port 9190"]
+    end
+  end
+
+  subgraph EX["«device» 纯执行宿主(可横向扩)"]
+    direction TB
+    subgraph EA["«execution environment» rdsctl-agent@hostN"]
+      EAG["«artifact» rdsctl agent --port 9190"]
+      EDK["«artifact» dockerd → 实例容器"]
+      EAG -->|"docker CLI"| EDK
+    end
+  end
+
+  LB -->|"HTTP :9113"| AB
+  LB -->|"HTTP :9113"| BB
+  LB -->|"HTTP :9113"| CB
+  AB <-->|"Raft :9330 · X-Cluster-Token"| BB
+  BB <-->|"Raft :9330"| CB
+  AB <-->|"Raft :9330"| CB
+
+  AB --> AE
+  AB ==>|"变更 :9190 · x-agent-token<br/>x-rdsctl-fence + x-rdsctl-idem"| AG
+  BB ==>|"变更 :9190"| BAG
+  CB ==>|"变更 :9190"| CAG
+  AB ==>|"跨机变更 :9190<br/>(任一控制器 → 任一 agent)"| EAG
+
+  SINK[("«device» 元数据 MySQL sink · :3306<br/>投影 / 审计 / 分析 · 不在正确性路径")]
+  AB -.->|"每 5s 幂等投影"| SINK
+
+  classDef cp fill:#e8f0fe,stroke:#1a73e8,color:#0b1f3a
+  classDef exec fill:#e6f4ea,stroke:#1e8e3e,color:#0b2b16
+  classDef sink fill:#fef7e0,stroke:#f9ab00,color:#3c2b00
+  class AB,AE,AD,BB,BD,CB,CD cp
+  class AG,ADK,BAG,CAG,EAG,EDK exec
+  class SINK sink

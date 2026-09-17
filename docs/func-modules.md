@@ -45,10 +45,17 @@ DAG 由模块/节点组合;系统内置四类生命周期编排(create/destroy/s
 步骤为 serde 外部标签 JSON,示例:
 ```json
 [
-  {"ExecSql": {"container": "{instance}", "user": "root", "pass": "rds_root_2024", "sql": "SELECT 1"}},
+  {"ExecSql": {"container": "{instance}", "user": "root", "pass": "", "sql": "SELECT 1"}},
   {"Noop": {"note": "说明步骤"}}
 ]
 ```
+
+> **口令一律留空**:`pass` 为空且 `user=root` 时,后端在执行瞬间填实例统一 root 口令
+> (env `RDSCTL_ROOT_PASS`,见 `rdsctl.env.example`)。这样做有两个原因:
+> ① 步骤 JSON 会落库(task_nodes)并经 `GET /api/rds/task` 下发给 `tasks.view` 用户,
+> 写明文等于把口令发给每个只读用户;② 口令可随环境轮换,历史任务不改。
+> 内置编排(create/scaleout/backup)同样遵循该约定,配置模板中的口令以哨兵
+> `__RDSCTL_ROOT_PASSWORD__` / `__RDSCTL_REPL_PASSWORD__` 占位,落盘时才替换。
 
 ## 边界
 

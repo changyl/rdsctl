@@ -1,0 +1,29 @@
+flowchart LR
+  APP["应用 / DBA 客户端"] -->|"MySQL 协议"| LVS["进程内 LVS<br/>127.0.0.1:{lvs_mysql_port}<br/>round-robin(v0 仅本机)"]
+
+  subgraph NET["docker network rds-{name}"]
+    M["rds-{name}-master<br/>-p 127.0.0.1:{35000+n}:3306<br/>--log-bin=mysql-bin --binlog-format=ROW"]
+    S1["rds-{name}-slave-1<br/>不发布宿主端口<br/>--read-only=1"]
+    S2["rds-{name}-slave-2<br/>不发布宿主端口"]
+    PK1["rds-{name}-proxy-1<br/>容器端口 4051(数据)/ 9111(管理)<br/>宿主 127.0.0.1:{探测分配}<br/>bind mount newproxy.conf"]
+    PK2["rds-{name}-proxy-2"]
+    XN["itype=xenon(raft 高可用架构,替代主从)<br/>rds-{name}-xenon{i}: 3306 + RPC 8801<br/>命名卷 xenon-data-{node} / xenon-meta-{node}<br/>peers 用容器名互连;可选 rsproxy + LVS"]
+  end
+
+  LVS --> PK1
+  LVS --> PK2
+  PK1 --> M
+  PK1 --> S1
+  PK2 --> S1
+  M ==>|"GTID · SOURCE_AUTO_POSITION=1"| S1
+  M ==>|"GTID"| S2
+
+  DTS["rds-{name}-dts-{node}<br/>占位容器,不跑 canal 引擎<br/>不在正确性路径"]
+  BAK["备份:容器内 mysqldump --single-transaction<br/>→ /tmp/rds-{name}-backup.sql<br/>宿主只写 logs/rds/{name}/backup/README.txt"]
+  M -.-> DTS
+  M -.-> BAK
+
+  classDef data fill:#e6f4ea,stroke:#1e8e3e,color:#0b2b16
+  classDef aux fill:#f1f3f4,stroke:#5f6368,color:#202124
+  class M,S1,S2,PK1,PK2,XN data
+  class DTS,BAK,LVS aux

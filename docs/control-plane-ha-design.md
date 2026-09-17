@@ -52,8 +52,9 @@
 | A4 | 执行面部署 agent 且支持 fence 头(§9) | `ping` 上报 `fence_capable:true`;不支持则系统进入 `best-effort` 模式并**明示不满足 G1** |
 | A5 | 提供进程守护,崩溃后自动拉起 | **已在仓库交付模板**:`deploy/systemd/rdsctl@.service`(模板单元,`Restart=always` + `RestartPreventExitStatus=2`)、`deploy/systemd/rdsctl-agent@.service`、`deploy/launchd/*.plist`(macOS 开发/演练);安装与运维见 `deploy/README.md`、`docs/ops-guide-cluster.md`。前提仍要求**部署方完成安装**并在监控中确认守护生效 |
 | A6 | 所有会产生副作用的 Step 声明 `idem_key`;无法声明者必须带前置条件断言 | 步骤清单见 §8.4;缺 `idem_key` 的 Step 在 cluster 模式**拒绝执行**(启动期静态校验) |
+| A7 | **时间参数与实测网络同档**:`election_timeout ≥ 4 ×` 单次 RPC 往返,且丢包在可接受范围 | **部署层**:`deploy/bin/rdsctl-preflight.sh` 第 6 项(每 peer **五次**取最小值,丢包 > `RDSCTL_MAX_PEER_LOSS_PCT`(默认 20%)或往返超预算即退出码 2);**进程内**:`SelfCheck.network_ok` + `/readyz` 的 `premises_unverified: A7_network`。跨区部署时这项决定"是否选主风暴",详见 §20。lab 可用 `RDSCTL_ALLOW_SLOW_NETWORK=1` 放行(标注未验证) |
 
-> 不满足 A1–A6 时系统必须**显式拒绝进入 cluster 模式**或降级并标注,不允许"静默正确性损失"。
+> 不满足 A1–A7 时系统必须**显式拒绝进入 cluster 模式**或降级并标注,不允许"静默正确性损失"。
 
 ---
 
@@ -144,6 +145,12 @@ rdsctl agent [--port 9190]        # 执行面(每宿主机一个;本机也部署
 | `RDSCTL_LEASE_TTL_MS` | `30000` | 实例租约时长(必须 ≥ 10 × `max_skew`) |
 | `RDSCTL_METADATA_SINK` | `mysql` | `mysql` = 投影到 MySQL(兼容既有页面);`none` = 全自持无 sink |
 | `RDSCTL_UNSAFE_NO_FSYNC` | `0` | 仅 `single` 模式或 lab 可用;cluster 模式设 1 时启动即拒绝(违背 A2) |
+| `RDSCTL_HEARTBEAT_MS` | 未设时 `min(300, 选举下限/4)` | 心跳周期。**时间参数必须与网络同档**(A7):跨区/跨 AZ 部署要放大选举超时,心跳会自动收窄;显式配置时校验"心跳 < 选举下限的一半",否则拒绝启动(§20) |
+| `RDSCTL_ELECTION_TIMEOUT_MS` | `1500`(区间 `(n, 2n)`) | 选举超时下限。跨区部署按 `≥ 4 × 实测 RPC 往返` 放大(粗放口径可到 6–8×) |
+| `RDSCTL_SNAPSHOT_DELIVER_MS` | `300000` | 单条 `InstallSnapshot` 的投递预算。**不能**沿用普通消息的 3s:整份快照是一条消息,3s 下跨区永远传不完(§20) |
+| `RDSCTL_MAX_PEER_RTT_MS` | `0`(不限) | preflight 的 RPC 往返**绝对**上限(0 = 只校验与选举超时的关系) |
+| `RDSCTL_MAX_PEER_LOSS_PCT` | `20` | preflight 允许的探测丢包率上限(5 次探测:丢 1 次 = 20%,仍可通过) |
+| `RDSCTL_ALLOW_SLOW_NETWORK` | `0` | lab 放行"网络预算不达标"(A7);放行后 `/readyz` 仍标注 `A7_network` 未验证 |
 
 > **single 模式零变化**是硬要求:既有 `cargo test`(单测 100 项)与 P0 验收 3 项必须继续全绿(见验收文档「回归门禁」)。
 
@@ -812,7 +819,109 @@ sink(元数据库,默认 MySQL,兼容既有页面/报表/慢查/容量表)是**�
 8. **副本间实例视图不一致**:`load_persisted` 会把"操作中"的实例在内存里强判 Failed(单机语义),cluster 模式下这会与 leader 的续跑对打(实测 leader 已 running、follower 仍 failed)。已加集群门禁 + **每 5s 从 sink 回灌视图**(sink 作读模型,设计 §12);实例登记迁入状态机仍属 M1c。
 9. **恢复期一处状态写回遗漏**:日志尾部截断后曾直接返回(本轮解析出的 entries 未写回 `self`),表现为"恢复后日志为空"。已改为截断后重放收敛。
 
-**当前回归基线**:`cargo test --offline --bin rdsctl` = **149 通过 / 0 失败**(R1 绿);`cargo test --offline --test ha_agent_fence` = 3/3;`cargo test --offline --test ha_cluster` = 5/5。
+**当前回归基线**(`cargo test --offline`,MySQL/docker 就绪,一次全绿 = **201 通过 / 0 失败**):
+`--bin rdsctl` = **171**/0(跨区加固新增 3 项:
+`ha::raft::tests::one_way_delay_is_removed_by_rtt_correction`、
+`ha::runtime::tests::inflight_suppression_is_per_peer_and_never_delays_elections`、
+`ha::runtime::tests::slow_peer_network_fails_self_check_until_timeouts_are_widened`);
+`--test acceptance` = **15**/0(P0 验收,"single 模式零变化"由此背书);
+`--test ha_agent_fence` = **3**/0;
+`--test ha_cluster` = **12**/0(真实三进程,含 F1 失效转移、F5/fence、F10 滚动升级、I5 多数派恢复;连跑三次稳定)。
 
 > 更正记录:上一轮曾报告 `instance::xenon_create::*` 有 6 项"既有失败"。经复查,那是**环境问题**——本机 MySQL 未运行(该组用例需要真实 MySQL),**不是**代码缺陷:启动捆绑 MySQL 后同一套用例全绿。教训已记:涉及 MySQL 的用例,基线必须在 MySQL 就绪的前提下取。
 - 设计完成度自检:**每条决策有依据锚点**(§2 表)+ **被否方案与理由**(§5.7)+ **代价与取舍**(§17.2);**每条不变量有机制与用例**(§3 ↔ 验收文档);**无 TBD**(§17.3 的 6 个开放项均已给出推荐默认,不阻塞实现)。
+
+---
+
+## 20. 跨区域部署(中国 / 美东 / 欧洲)
+
+> 起因:问"当前 cluster 模式已满足 raft 高可用,跨区域部署是否有问题"。
+> 结论:**有问题,且不是调参能兜住的**。本节记录评估结论、**已落地的加固**与**仍未落地(阻断跨区)的项**。
+
+### 20.1 结论速览
+
+| 维度 | 同城/同 AZ(设计前提) | 跨区(中国/美东/欧洲) |
+|---|---|---|
+| 心跳节拍 | 300ms,单条投递 3s 上限;选举 1.5–3s ⇒ 余量充足 | 单次 RPC 往返 150–400ms;**时间参数不同档就选主风暴**(A7) |
+| 时钟偏移估计 | 单程延迟 ≪ `max_skew`,单向上界够用 | 单程延迟 80–150ms 变成**结构性偏差**:轻则淹没真信号,重则**拒绝授予一切租约**(§20.2) |
+| 快照追赶 | 3s 内能传完;传不完也只是慢 | 整份快照一条消息 + 3s 上限 ⇒ **落后副本永远追不上**,且每轮心跳被拖 3s(§20.3) |
+| 写延迟 | 一次多数派 fsync(数 ms) | 一次多数派提交 = 跨区一个往返(数百 ms);登录等多跳操作 p99 到秒级 |
+| 故障域 | 1 台机器 | **1 个区域**:3 voter 分放三区时,任两区失联即写停(fail-closed,设计如此) |
+| region 权威模型 | 不需要 | **缺**:`Op` 全集无 region/目录(`src/ha/state.rs`),分片与 region 无关 ⇒ 无"就近路由/分区放置"依据 |
+
+**建议**:目标形态走 **M1.5(每 region 一套控制面 + 区域目录只读汇聚)**,把 WAN 从正确性路径里移出去;
+过渡期若必须跨区跑单一控制面,必须完成 §20.2–§20.4 的加固并接受"失两区即写停"。
+
+### 20.2 时钟偏移估计:剔除单程延迟(已落地)
+
+- **原口径**:`observe_clock` 用 `offset = sender_ms − local_recv_ms`,**含单程延迟**;注释自述"同城 ≪ max_skew"。
+  跨区单程 80–150ms 时:`skew_measured_ms` 常态上百毫秒 ⇒ 监控阈值(`>500` 告警 / `>1000` 拒绝授予)失去意义;
+  若按"租约更安全"把 `RDSCTL_MAX_SKEW_MS` 收紧(同城实践会取 100ms 量级),会**持续**判 `skew_exceeded`
+  ⇒ **拒绝授予任何新租约**(表现为"探针 ready、一切实例操作失败")。
+- **已修**(`src/ha/raft.rs`):
+  1. 响应消息回显请求时间戳(`echo_ms`),发起方据此算 `RTT = T4 − T1`,用 `offset ≈ raw + RTT/2` 修正;
+  2. follower 测不到 RTT ⇒ leader 在每个心跳里回带"我对你的修正后估计"(`peer_skew_ms`),双方口径一致;
+  3. 样本过滤口径分流:有本地 RTT 修正的样本取 **RTT 最小**者(不能用 `|offset|` 最小 —— 过修正会偏小,
+     属系统性低估),纯单向样本仍取 `|offset|` 最小者;
+  4. 修正量按 `CLOCK_RTT_CORRECTION_CAP_MS = 2000` 封顶:一次被卡住的投递不得把真实偏移整段抹平;
+  5. 新增字段一律 `#[serde(default)]` ⇒ 滚动升级期间新旧节点可混跑(老对端退化为单向上界口径,不假装已修正)。
+- 验收:`ha::raft::tests::one_way_delay_is_removed_by_rtt_correction`(150ms 单程 + 5ms 真偏移:
+  旧口径报 145ms 且在 `max_skew=50` 下判超界,新口径报 5ms 且不误判)。
+
+### 20.3 快照安装:脱离 3s 单消息预算(已落地)
+
+- **原缺陷**:`Message::InstallSnapshot` 把整份快照 JSON 塞进**一条**消息,经 `deliver_inner` 投递时被
+  `DELIVER_TIMEOUT_MS=3000` 硬卡;设计点 10 万实例 ≈ 500MB/副本 ⇒ 跨区(乃至同城大状态机)必然超时
+  ⇒ 落后副本**永远追不上**;更糟的是超时发生在**串行投递循环内**,一个待装快照的 peer 会把同轮其它 peer 的
+  心跳推迟 3s ⇒ follower 选举 ⇒ 换主 ⇒ 新 leader 重复 ⇒ **选主风暴**。
+- **已修**:
+  1. 投递预算按消息种类分档(`deliver_budget_ms`):`InstallSnapshot` 用 `RDSCTL_SNAPSHOT_DELIVER_MS`(默认 300s),
+     普通消息仍是 3s;`post_json` 的隐藏 10s 超时改为**调用方显式给预算**(避免调用点忘记预算);
+  2. 投递由"串行"改为**批内并发**(`JoinSet`),且去掉了全局 `delivering` 开关,改为**按 peer** 在途抑制
+     (只抑制周期性的 `AppendEntries`,选举类消息一律不抑制)——这才是"一个慢 peer 不得拖住健康 peer 心跳"的根因修复。
+- **仍未落地(重要)**:快照**未分块/不支持断点续传**,超大快照会长时间占用一条连接与一份内存;
+  压实(`maybe_snapshot`)也**不考虑追赶中的 follower**(`log.len() > 50k` 即压到 applied_index)⇒
+  区际断链超过日志保留窗口后,恢复只能走整份快照。**这一步没做之前,跨区的大状态机追赶仍不可靠。**
+
+### 20.4 时间参数同档与门禁(已落地)
+
+- **心跳自动收窄**:`RDSCTL_HEARTBEAT_MS` 未设时取 `min(300, 选举下限/4)`。
+  这条同时修掉一个既有脆弱配置:`RDSCTL_ELECTION_TIMEOUT_MS=400~800`(lab/测试)配默认心跳 300ms ——
+  "心跳吃掉大半个选举超时"。
+- **配置校验**(`RaftConfig::validate`):心跳 ≥ 选举下限的一半 ⇒ **拒绝启动**(时间参数必须同档),
+  错误信息直接给出跨区该怎么做。
+- **前提 A7 + 双层门禁**:部署层 `rdsctl-preflight.sh` 第 6 项实测每 peer 的单次 RPC 往返
+  (三次取最小,与真实投递同构 = 建连 + 请求/响应),判据 `选举超时 ≥ 4 × 实测往返`,不达标退出码 2
+  并打印"建议放大到 ≥ N ms";进程内 `SelfCheck.network_ok` 同判据,并写进 `/readyz`
+  (`premises_unverified: A7_network` + `selfcheck.network_ok` + `notes`)。
+- 仍**未**落地:运行期持续采样对端 RTT/丢包并在 `/readyz`/集群页展示(目前只在启动期实测);
+  `wait_visible_on_all` 与集群页探测的 500ms/700ms 固定超时在跨区抖动下会误报"未确认成员"。
+
+### 20.5 跨区仍阻断的项(不要跳过)
+
+| # | 项 | 为什么阻断 | 归属 |
+|---|---|---|---|
+| 1 | 权威状态机无 region/目录模型(`Op` 全集无 region;`i/<instance>` 只在测试里) | 无"就近路由/分区放置"的权威依据;分片 = `hash(instance) % shard_count` 与 region 无关 ⇒ 中国实例的写恒由跨区 leader 提交 | **M1.5** |
+| 2 | 快照未分块/无断点续传 + 压实不保护追赶中的 follower | 区际断链数小时后落后副本无法自动追赶(见 §20.3) | M1a 收尾 |
+| 3 | 数据面跨区(xenon raft 成员跨区、MySQL 半同步跨区) | RTT 直接进提交延迟;管控面当前把 xenon RPC 端点当本机映射 | M2(`docs/scaling-design.md:231`) |
+| 4 | 内部 RPC/agent 明文 HTTP + 可选共享 token(`/internal/propose` 可提交任意 op) | 跨区链路(尤其过公网/第三方)不适合裸跑;fence 的资源侧强制形同虚设 | 安全里程碑(§9.3 已留契约) |
+| 5 | sink(MySQL)启动期一次性判定,不可达即只提供探针且**运行期不自愈**;且无连接超时 | 跨区 WAN 抖动下滚动重启会让管理面整体不可用;`TcpStream::connect` 无超时会挂住启动 | M1a 收尾 |
+
+### 20.6 过渡期跨区部署的推荐配置(单一控制面跨三区)
+
+```bash
+# ① 先实测(把 RTT 打出来),再按实测值定价;不要凭感觉写
+RDSCTL_MODE=cluster RDSCTL_NODE_ID=n1 RDSCTL_CLUSTER='...' \
+  deploy/bin/rdsctl-preflight.sh n1 /etc/rdsctl/rdsctl.env
+
+# ② 时间参数与实测同档(例:实测单次 RPC 往返 ~300ms)
+RDSCTL_ELECTION_TIMEOUT_MS=3000   # ≥ 4×300;跨区建议再放宽到 6–8×(本样例取 10×)
+# RDSCTL_HEARTBEAT_MS 不设 ⇒ 自动取 min(300, 3000/4)=300(不要超过选举下限的一半)
+RDSCTL_SNAPSHOT_DELIVER_MS=600000 # 大状态机的快照追赶预算
+
+# ③ 时钟:A1 的 max_skew 仍是**租约安全参数**,不要为了"消掉单程延迟"而放宽它 ——
+#    单程延迟已由 RTT 修正剔除(§20.2),max_skew 保持 1000ms 或按真实 NTP 质量收紧。
+```
+
+> 仍然存在的代价(必须让业务方知情):写入要跨区一个往返(数百 ms);**任意两个区域失联即写停**(fail-closed);
+> 入口层只承诺"多地址 + 快速重绑"(§10.4),不要承诺跨区单 VIP 无缝漂移。

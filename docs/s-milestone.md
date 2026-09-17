@@ -13,7 +13,8 @@
 | `roles` / `user_roles` / `role_perms` | 角色、用户-角色、角色-权限 |
 | `alerts` | 告警:instance/kind/severity/status/assignee/handled_at/resolved_at |
 
-种子:`admin`(凭据 RDSCTL_USER/PASS,默认 admin/admin)+ 内置 `super`(自动展开全部权限)。
+种子:由 `RDSCTL_USER` / `RDSCTL_PASS` 指定的管理员(具体值见部署配置,不入文档)
++ 内置 `super`(自动展开全部权限)。**首次登录后立即改密**。
 `instances` 新增语义字段 `enabled`(JSON 内,serde 默认 true,旧记录兼容)。
 
 ## 2. 权限目录(12 项,前端权限树同源)

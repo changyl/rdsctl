@@ -73,7 +73,9 @@ pub async fn exec_in(container: &str, args: &[String]) -> Result<String, String>
 
 ```rust
 Step::DockerExec { container, args } => {
-    let out = dk::exec_in(&container, &args).await?;
+    // 按路由走平台无关执行面(本机默认后端 / 远端 agent;平台由 agent 侧决定)
+    let rt = runtime_of_route(&step_route(&ctx.instance, &container))?;
+    let out = rt.exec(&container, &args).await?;
     Ok(if out.trim().is_empty() {
         format!("{container}: docker exec 完成")
     } else {
@@ -81,6 +83,9 @@ Step::DockerExec { container, args } => {
     })
 }
 ```
+
+> 注:`Step::DockerRun` / `DockerExec` 等步骤现在经平台无关执行面执行,接入非 docker 平台
+> 不必改步骤定义(见 [container-platform-abstraction.md](./container-platform-abstraction.md))。
 
 > 提交点:新增变体不需要改 `dag.rs` 其它地方(持久化靠 serde 派生;`resume_pending`
 > 从落库 JSON 反序列化)。若新步骤要在模块分类里参与判定,见第 4 步。
@@ -96,7 +101,8 @@ fn backup_nodes(name: &str, master_c: &str) -> Vec<TaskNode> {
     let mc = master_c.to_string();
     let dump = format!("/tmp/rds-{n}-backup.sql");
     let cmd = format!(
-        "set -e; mysqldump -u root -p'{ROOT_PASS}' --single-transaction --quick --databases {APP_DB} > {dump} 2> /tmp/rds-{n}-dump.err; echo 'backup-ok bytes='$(wc -c < {dump})"
+        // 口令从容器自身 env 取:命令会随步骤 JSON 落库/下发,内联明文等于把口令发给只读用户
+        "set -e; mysqldump -u root -p\"$MYSQL_ROOT_PASSWORD\" --single-transaction --quick --databases {APP_DB} > {dump} 2> /tmp/rds-{n}-dump.err; echo 'backup-ok bytes='$(wc -c < {dump})"
     );
     vec![TaskNode {
         id: "backup".into(),

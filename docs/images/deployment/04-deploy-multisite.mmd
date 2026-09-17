@@ -1,0 +1,37 @@
+flowchart TB
+  subgraph R1["region cn-north(az1 + az2 + az3)"]
+    C1["«artifact» 控制面副本 1<br/>:9113 · rpc :9330"]
+    M1["«artifact» 受管实例<br/>rds-app1-master :{35000+n}"]
+    P1["«artifact» rds-app1-proxy-K<br/>:4051 / 管理 :9111"]
+  end
+
+  subgraph R2["region cn-east"]
+    C2["«artifact» 控制面副本 2<br/>:9113 · rpc :9330"]
+    S1["«artifact» 受管实例(跨区从)<br/>rds-app1-slave-1"]
+  end
+
+  subgraph R3["region us-east"]
+    C3["«artifact» 控制面副本 3<br/>:9113 · rpc :9330"]
+    S2["«artifact» 受管实例(跨区从)<br/>rds-app1-slave-2"]
+  end
+
+  C1 <-->|"Raft :9330<br/>实测 RTT 150–400ms<br/>选举超时 ≥4×RTT(跨区建议 6–8×)"| C2
+  C2 <-->|"Raft :9330"| C3
+  C1 <-->|"Raft :9330"| C3
+
+  M1 ==>|"GTID 复制(ROW)<br/>跨区时 SOURCE_HOST 换成主机可达地址"| S1
+  M1 ==>|"GTID 复制"| S2
+  P1 --> M1
+
+  BLOCK["⏳ 跨区 5 项阻断(设计 §20.5)<br/>① 权威状态机无 region/目录模型 → 无就近路由依据<br/>② 快照未分块、无断点续传,压实不保护追赶 follower<br/>③ 数据面跨区(xenon raft / 半同步)未验证<br/>④ 内部 RPC / agent 明文 HTTP + 共享 token,不适用公网<br/>⑤ sink 启动期一次性判定、运行期不自愈"]
+  BLOCK -.-> C1
+
+  WRITE["写路径代价与失效边界<br/>· 单一控制面跨三区:写要跨区一个多数派往返(数百 ms)<br/>· 任意两区失联 → 写停(fail-closed),绝不本地写成功<br/>· 过渡建议:每 region 一套控制面(M1.5 解 region 模型)"]
+  WRITE -.-> C2
+
+  classDef cp fill:#e8f0fe,stroke:#1a73e8,color:#0b1f3a
+  classDef data fill:#e6f4ea,stroke:#1e8e3e,color:#0b2b16
+  classDef warn fill:#fce8e6,stroke:#d93025,color:#3c0a06
+  class C1,C2,C3 cp
+  class M1,S1,S2,P1 data
+  class BLOCK,WRITE warn
